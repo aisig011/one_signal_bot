@@ -576,6 +576,14 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 # ============================================================
+#  Глобальный обработчик ошибок — чтобы ошибки в job_queue
+#  (фоновом сканировании) не "проглатывались" молча
+# ============================================================
+async def error_handler(update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error(f"Необработанная ошибка: {context.error}", exc_info=context.error)
+
+
+# ============================================================
 #  Запуск бота
 # ============================================================
 def main():
@@ -650,13 +658,14 @@ def main():
     # Обработчик кнопок главного меню и текстовых сообщений — последним,
     # чтобы не перехватывать диалоги выше
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+    app.add_error_handler(error_handler)
 
     # --- Фоновое сканирование рынка ---
     job_queue = app.job_queue
     job_queue.run_repeating(
         scheduler.scan_market,
         interval=scheduler.SCAN_INTERVAL_SECONDS,
-        first=60,  # первая проверка через 1 минуту после запуска
+        first=10,  # первая проверка через 10 секунд после запуска (для быстрой проверки)
     )
 
     logger.info("Бот запущен")
