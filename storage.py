@@ -11,7 +11,7 @@ DB_PATH = Path(__file__).parent / "bot_data.db"
 
 
 def init_db():
-    """Создаёт таблицу пользователей, если её ещё нет."""
+    """Создаёт таблицы, если их ещё нет."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -19,9 +19,80 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             deposit REAL,
             risk_percent REAL,
-            coins TEXT DEFAULT 'BTC,ETH'
+            coins TEXT DEFAULT 'BTC,ETH,SOL,BNB,XRP'
         )
     """)
+    # Таблица для отслеживания, какой сигнал последний раз отправляли
+    # пользователю по каждой монете+направлению — чтобы не дублировать.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sent_signals (
+            user_id INTEGER,
+            coin TEXT,
+            direction TEXT,
+            entry_price REAL,
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, coin, direction)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def get_all_configured_users():
+    """Возвращает список всех пользователей, у которых заданы депозит и риск."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT user_id, deposit, risk_percent, coins FROM users
+        WHERE deposit IS NOT NULL AND risk_percent IS NOT NULL
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [
+        {
+            "user_id": row[0],
+            "deposit": row[1],
+            "risk_percent": row[2],
+            "coins": row[3].split(",") if row[3] else [],
+        }
+        for row in rows
+    ]
+
+
+def was_signal_sent_recently(user_id: int, coin: str, direction: str, entry_price: float, threshold_pct: float = 0.5) -> bool:
+    """
+    Проверяет, отправляли ли уже похожий сигнал (та же монета+направление,
+    цена входа отличается менее чем на threshold_pct%) за последние 6 часов.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT entry_price, sent_at FROM sent_signals
+        WHERE user_id = ? AND coin = ? AND direction = ?
+        AND sent_at > datetime('now', '-6 hours')
+    """, (user_id, coin, direction))
+    row = cursor.fetchone()
+    conn.close()
+
+    if row is None:
+        return False
+
+    old_price = row[0]
+    price_diff_pct = abs(entry_price - old_price) / old_price * 100
+    return price_diff_pct < threshold_pct
+
+
+def mark_signal_sent(user_id: int, coin: str, direction: str, entry_price: float):
+    """Записывает, что сигнал отправлен (для защиты от дублей)."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO sent_signals (user_id, coin, direction, entry_price, sent_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id, coin, direction) DO UPDATE SET
+            entry_price = ?, sent_at = CURRENT_TIMESTAMP
+    """, (user_id, coin, direction, entry_price, entry_price))
     conn.commit()
     conn.close()
 
