@@ -19,6 +19,8 @@ from telegram.ext import (
 )
 
 import storage
+import market
+import indicators
 
 # --- Настройка логов (видно в Railway, удобно для отладки) ---
 logging.basicConfig(
@@ -279,8 +281,80 @@ ASK_DEPOSIT_ONLY, ASK_RISK_ONLY = range(2, 4)
 
 
 # ============================================================
-#  /cancel — выйти из диалога
+#  /check — ручная проверка индикаторов по монете (мультитаймфрейм)
 # ============================================================
+TIMEFRAMES = {
+    "15m": "15m",
+    "1h": "1h",
+    "4h": "4h",
+}
+
+
+async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args  # например ['BTC'] из "/check BTC"
+
+    if not args:
+        await update.message.reply_text(
+            "Напиши монету после команды, например:\n/check BTC"
+        )
+        return
+
+    coin = args[0].upper()
+    symbol = market.get_symbol(coin)
+
+    await update.message.reply_text(f"⏳ Загружаю данные по {coin}...")
+
+    try:
+        current_price = market.get_current_price(symbol)
+    except Exception as e:
+        await update.message.reply_text(
+            f"⚠️ Не удалось получить данные по {coin}.\n"
+            f"Проверь правильность названия монеты (например BTC, ETH, SOL).\n\n"
+            f"Ошибка: {e}"
+        )
+        return
+
+    text = f"📊 *{coin}/USDT*\n💰 Текущая цена: {current_price}\n\n"
+
+    for label, interval in TIMEFRAMES.items():
+        try:
+            df = market.get_klines(symbol, interval, limit=250)
+            summary = indicators.summarize(df)
+
+            trend_emoji = {
+                "bullish": "🟢 восходящий",
+                "bearish": "🔴 нисходящий",
+                "flat": "⚪ флэт",
+            }[summary["trend"]]
+
+            macd_emoji = {
+                "bullish": "🟢 бычий",
+                "bearish": "🔴 медвежий",
+                "neutral": "⚪ нейтральный",
+            }[summary["macd_signal"]]
+
+            rsi_value = summary["rsi"]
+            rsi_str = f"{rsi_value:.1f}" if not pd_isna(rsi_value) else "н/д"
+
+            text += (
+                f"⏱ *{label}*\n"
+                f"  Тренд: {trend_emoji}\n"
+                f"  RSI: {rsi_str} ({summary['rsi_state']})\n"
+                f"  MACD: {macd_emoji}\n\n"
+            )
+        except Exception as e:
+            text += f"⏱ *{label}*: ошибка загрузки ({e})\n\n"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+def pd_isna(value) -> bool:
+    """Небольшая обёртка, чтобы не импортировать pandas в bot.py напрямую."""
+    import pandas as pd
+    return pd.isna(value)
+
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Отменено. Напиши /start чтобы начать заново.")
     return ConversationHandler.END
@@ -340,6 +414,7 @@ def main():
     app.add_handler(deposit_handler)
     app.add_handler(risk_handler)
     app.add_handler(CommandHandler("settings", settings))
+    app.add_handler(CommandHandler("check", check_command))
 
     logger.info("Бот запущен")
     app.run_polling()
