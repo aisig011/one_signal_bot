@@ -21,9 +21,18 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
     Запускается планировщиком каждые SCAN_INTERVAL_SECONDS.
     Проходит по всем пользователям и их монетам, ищет сигналы.
     """
-    users = storage.get_all_configured_users()
+    logger.info("scan_market: запуск сканирования")
+
+    try:
+        users = storage.get_all_configured_users()
+    except Exception as e:
+        logger.error(f"scan_market: ошибка получения пользователей: {e}", exc_info=True)
+        return
+
+    logger.info(f"scan_market: найдено пользователей с настройками: {len(users)}")
 
     if not users:
+        logger.info("scan_market: нет настроенных пользователей, завершаю")
         return
 
     # Собираем уникальный набор монет, чтобы не запрашивать одно и то же
@@ -32,10 +41,14 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
     # запросов всё равно немного: до ~5 монет x число пользователей)
 
     for user in users:
+        logger.info(f"scan_market: пользователь {user['user_id']}, монеты: {user['coins']}")
+
         for coin in user["coins"]:
             coin = coin.strip().upper()
             if not coin:
                 continue
+
+            logger.info(f"scan_market: анализирую {coin} для {user['user_id']}")
 
             try:
                 result = signals.find_signal(
@@ -45,18 +58,22 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                     min_rr=2.0,
                 )
             except Exception as e:
-                logger.warning(f"Ошибка анализа {coin} для пользователя {user['user_id']}: {e}")
+                logger.warning(f"scan_market: ошибка анализа {coin} для пользователя {user['user_id']}: {e}", exc_info=True)
                 continue
 
             if result is None:
+                logger.info(f"scan_market: {coin} — сигнала нет")
                 continue
 
             trade = result["trade"]
             direction = trade["direction"]
             entry_price = trade["entry_price"]
 
+            logger.info(f"scan_market: {coin} — НАЙДЕН сигнал {direction} @ {entry_price}")
+
             # Проверяем, не отправляли ли уже похожий сигнал недавно
             if storage.was_signal_sent_recently(user["user_id"], coin, direction, entry_price):
+                logger.info(f"scan_market: {coin} {direction} — уже отправлялся недавно, пропускаю")
                 continue
 
             text = format_signal_message(result, user)
@@ -68,9 +85,11 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                     parse_mode="Markdown",
                 )
                 storage.mark_signal_sent(user["user_id"], coin, direction, entry_price)
-                logger.info(f"Сигнал {coin} {direction} отправлен пользователю {user['user_id']}")
+                logger.info(f"scan_market: сигнал {coin} {direction} отправлен пользователю {user['user_id']}")
             except Exception as e:
-                logger.warning(f"Не удалось отправить сообщение пользователю {user['user_id']}: {e}")
+                logger.warning(f"scan_market: не удалось отправить сообщение пользователю {user['user_id']}: {e}", exc_info=True)
+
+    logger.info("scan_market: сканирование завершено")
 
 
 def format_signal_message(result: dict, user: dict) -> str:
