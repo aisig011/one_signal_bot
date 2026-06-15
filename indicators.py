@@ -41,21 +41,18 @@ def get_trend(df: pd.DataFrame) -> str:
     """
     Определяет тренд по EMA на последней свече.
     Возвращает 'bullish' (восходящий), 'bearish' (нисходящий) или 'flat' (флэт/неясно).
+
+    Смягчённая логика (v3): ориентируемся только на EMA20 vs EMA50 и
+    положение цены относительно EMA50. EMA200 больше не используется
+    как обязательное условие — на 4h она требует слишком много данных
+    и часто "запаздывает", из-за чего реальный тренд (видимый на
+    младших ТФ и по EMA20/50) ошибочно определялся как "флэт".
     """
     last = df.iloc[-1]
 
-    # Нужны валидные значения EMA 200 (для этого нужно минимум 200 свечей)
-    if pd.isna(last["ema_200"]):
-        # Если данных мало, ориентируемся только на EMA 20/50
-        if last["ema_20"] > last["ema_50"]:
-            return "bullish"
-        elif last["ema_20"] < last["ema_50"]:
-            return "bearish"
-        return "flat"
-
-    if last["close"] > last["ema_50"] > last["ema_200"]:
+    if last["close"] > last["ema_50"] and last["ema_20"] > last["ema_50"]:
         return "bullish"
-    elif last["close"] < last["ema_50"] < last["ema_200"]:
+    elif last["close"] < last["ema_50"] and last["ema_20"] < last["ema_50"]:
         return "bearish"
     return "flat"
 
