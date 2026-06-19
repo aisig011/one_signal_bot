@@ -35,6 +35,11 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info("scan_market: нет настроенных пользователей, завершаю")
         return
 
+    # Собираем уникальный набор монет, чтобы не запрашивать одно и то же
+    # с Binance несколько раз для разных пользователей с похожими списками.
+    # (Для простоты MVP считаем сигнал отдельно на каждого юзера+монету —
+    # запросов всё равно немного: до ~5 монет x число пользователей)
+
     for user in users:
         logger.info(f"scan_market: пользователь {user['user_id']}, монеты: {user['coins']}")
 
@@ -66,6 +71,7 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             logger.info(f"scan_market: {coin} — НАЙДЕН сигнал {direction} @ {entry_price}")
 
+            # Проверяем, не отправляли ли уже похожий сигнал недавно
             if storage.was_signal_sent_recently(user["user_id"], coin, direction, entry_price):
                 logger.info(f"scan_market: {coin} {direction} — уже отправлялся недавно, пропускаю")
                 continue
@@ -91,6 +97,17 @@ def format_signal_message(result: dict, user: dict) -> str:
     trade = result["trade"]
     direction_emoji = "🟢 LONG" if trade["direction"] == "LONG" else "🔴 SHORT"
 
+    sentiment_emoji = {
+        "positive": "🟢",
+        "neutral": "⚪",
+        "negative": "🔴",
+    }.get(result.get("news_sentiment", "neutral"), "⚪")
+
+    news_line = (
+        f"📰 Новостной фон: {sentiment_emoji} {result.get('news_sentiment', 'neutral')}"
+        f" ({result.get('news_reason', 'нет данных')})\n"
+    )
+
     leverage_note = ""
     if trade["leverage_reduced"]:
         leverage_note = (
@@ -103,7 +120,8 @@ def format_signal_message(result: dict, user: dict) -> str:
         f"📊 Тренд 1h: {result['trend_1h']}\n"
         f"📊 Тренд 4h: {result['trend_4h']}\n"
         f"📈 RSI 1h: {result['rsi_1h']:.1f}\n"
-        f"📍 Причина входа: {result['entry_reason']}\n\n"
+        f"📍 Причина входа: {result['entry_reason']}\n"
+        f"{news_line}\n"
         f"💰 Цена входа: {trade['entry_price']:.4f}\n"
         f"🛑 Стоп-лосс: {trade['stop_loss']:.4f} (-{trade['sl_percent']:.2f}%)\n"
         f"🎯 Тейк-профит 1: {trade['take_profit_1']:.4f} (+{trade['tp1_percent']:.2f}%)\n"
