@@ -1,7 +1,7 @@
 """
 news.py
 Получение крипто-новостей с cryptocurrency.cv (бесплатно, без ключа)
-и анализ их влияния на рынок через Claude API.
+и анализ их влияния на рынок через OpenAI API (ChatGPT).
 """
 
 import os
@@ -11,10 +11,9 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 NEWS_BASE_URL = "https://cryptocurrency.cv/api/v1"
 
-# Маппинг монет в поисковые запросы для новостей
 COIN_KEYWORDS = {
     "BTC": "Bitcoin BTC",
     "ETH": "Ethereum ETH",
@@ -25,12 +24,7 @@ COIN_KEYWORDS = {
 
 
 def get_news(coin: str, limit: int = 5) -> list[dict]:
-    """
-    Получает последние новости по монете с cryptocurrency.cv.
-    Возвращает список статей (title, description, published_at).
-    """
     keyword = COIN_KEYWORDS.get(coin.upper(), coin)
-
     try:
         response = requests.get(
             f"{NEWS_BASE_URL}/news",
@@ -39,9 +33,7 @@ def get_news(coin: str, limit: int = 5) -> list[dict]:
         )
         response.raise_for_status()
         data = response.json()
-
         articles = data.get("data", data.get("articles", data.get("results", [])))
-
         result = []
         for item in articles[:limit]:
             result.append({
@@ -50,32 +42,19 @@ def get_news(coin: str, limit: int = 5) -> list[dict]:
                 "published_at": item.get("published_at", item.get("publishedAt", "")),
             })
         return result
-
     except Exception as e:
         logger.warning(f"news: ошибка получения новостей для {coin}: {e}")
         return []
 
 
-def analyze_news_with_claude(coin: str, articles: list[dict]) -> dict:
-    """
-    Отправляет новости в Claude API и получает оценку влияния на рынок.
-
-    Возвращает словарь:
-    {
-        "sentiment": "positive" | "negative" | "neutral",
-        "risk_level": "low" | "medium" | "high",
-        "should_trade": True | False,
-        "reason": "краткое объяснение"
-    }
-    """
-    if not ANTHROPIC_API_KEY:
-        logger.warning("news: ANTHROPIC_API_KEY не задан, пропускаю анализ новостей")
+def analyze_news_with_openai(coin: str, articles: list[dict]) -> dict:
+    if not OPENAI_API_KEY:
+        logger.warning("news: OPENAI_API_KEY не задан, пропускаю анализ новостей")
         return _default_response()
 
     if not articles:
         return _default_response()
 
-    # Формируем текст новостей для промпта
     news_text = "\n\n".join([
         f"- {a['title']}\n  {a['description'][:200] if a['description'] else ''}"
         for a in articles
@@ -101,73 +80,61 @@ def analyze_news_with_claude(coin: str, articles: list[dict]) -> dict:
 
     try:
         response = requests.post(
-            "https://api.anthropic.com/v1/messages",
+            "https://api.openai.com/v1/chat/completions",
             headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
             },
             json={
-                "model": "claude-haiku-4-5-20251001",
+                "model": "gpt-4o-mini",
                 "max_tokens": 200,
+                "temperature": 0,
                 "messages": [{"role": "user", "content": prompt}],
             },
             timeout=15,
         )
         response.raise_for_status()
         data = response.json()
+        text = data["choices"][0]["message"]["content"].strip()
 
-        text = data["content"][0]["text"].strip()
-
-        # Убираем markdown-обёртку если есть
         if text.startswith("```"):
             text = text.split("```")[1]
             if text.startswith("json"):
                 text = text[4:]
 
         result = json.loads(text)
-
-        # Валидация полей
         result["sentiment"] = result.get("sentiment", "neutral")
         result["risk_level"] = result.get("risk_level", "low")
         result["should_trade"] = bool(result.get("should_trade", True))
         result["reason"] = result.get("reason", "")
-
         return result
 
     except json.JSONDecodeError as e:
-        logger.warning(f"news: ошибка парсинга JSON от Claude: {e}")
+        logger.warning(f"news: ошибка парсинга JSON от OpenAI: {e}")
         return _default_response()
     except Exception as e:
-        logger.warning(f"news: ошибка запроса к Claude API: {e}")
+        logger.warning(f"news: ошибка запроса к OpenAI API: {e}")
         return _default_response()
 
 
 def check_news_before_signal(coin: str) -> dict:
-    """
-    Главная функция — получает новости и анализирует их.
-    Вызывается из signals.py перед формированием сигнала.
-
-    Возвращает результат анализа. Если API недоступен или новостей нет —
-    возвращает дефолт (should_trade=True, risk=low) чтобы не блокировать
-    сигналы при технических проблемах.
-    """
     logger.info(f"news: проверяю новостной фон для {coin}")
-
     articles = get_news(coin, limit=5)
 
     if not articles:
         logger.info(f"news: новостей не найдено для {coin}, продолжаю")
         return _default_response()
 
-    result = analyze_news_with_claude(coin, articles)
-    logger.info(f"news: {coin} — sentiment={result['sentiment']}, risk={result['risk_level']}, should_trade={result['should_trade']}, reason={result['reason']}")
-
+    result = analyze_news_with_openai(coin, articles)
+    logger.info(
+        f"news: {coin} — sentiment={result['sentiment']}, "
+        f"risk={result['risk_level']}, should_trade={result['should_trade']}, "
+        f"reason={result['reason']}"
+    )
     return result
 
 
 def _default_response() -> dict:
-    """Дефолтный ответ когда новостей нет или API недоступен — не блокируем сигнал."""
     return {
         "sentiment": "neutral",
         "risk_level": "low",
