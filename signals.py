@@ -8,6 +8,7 @@ signals.py
 import market
 import indicators
 import risk_manager
+import news as news_module
 
 
 def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 2.0) -> dict | None:
@@ -34,6 +35,104 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
     Возвращает словарь с данными сигнала, или None если сигнала нет.
     """
     symbol = market.get_symbol(coin)
+
+    # --- Точка входа и тренд на 1h ---
+    df_1h = market.get_klines(symbol, "1h", limit=250)
+    df_1h = indicators.add_indicators(df_1h)
+
+    trend_1h = indicators.get_trend(df_1h)
+
+    if trend_1h == "flat":
+        return None  # нет чёткого тренда на 1h — не торгуем
+
+    last = df_1h.iloc[-1]
+    prev = df_1h.iloc[-2]
+
+    direction = None
+    entry_reason = None
+
+    # Расстояние цены от EMA20 в процентах (для пуллбэк-условия)
+    ema20_distance_pct = abs(last["close"] - last["ema_20"]) / last["ema_20"] * 100
+    near_ema20 = ema20_distance_pct <= 0.5
+
+    if trend_1h == "bullish":
+        # Разворот из перепроданности
+        rsi_recovering = prev["rsi"] < 35 and last["rsi"] > prev["rsi"]
+        # MACD пересекает сигнальную линию вверх
+        macd_cross_up = prev["macd_diff"] <= 0 and last["macd_diff"] > 0
+        # Пуллбэк к EMA20 в рамках тренда (не на перекупленности)
+        pullback = near_ema20 and last["rsi"] < 65 and last["close"] >= last["ema_50"]
+
+        if rsi_recovering:
+            direction = "LONG"
+            entry_reason = "разворот RSI из перепроданности"
+        elif macd_cross_up:
+            direction = "LONG"
+            entry_reason = "пересечение MACD вверх"
+        elif pullback:
+            direction = "LONG"
+            entry_reason = "пуллбэк к EMA20 в восходящем тренде"
+
+    elif trend_1h == "bearish":
+        # Симметрично для SHORT
+        rsi_recovering = prev["rsi"] > 65 and last["rsi"] < prev["rsi"]
+        macd_cross_down = prev["macd_diff"] >= 0 and last["macd_diff"] < 0
+        pullback = near_ema20 and last["rsi"] > 35 and last["close"] <= last["ema_50"]
+
+        if rsi_recovering:
+            direction = "SHORT"
+            entry_reason = "разворот RSI из перекупленности"
+        elif macd_cross_down:
+            direction = "SHORT"
+            entry_reason = "пересечение MACD вниз"
+        elif pullback:
+            direction = "SHORT"
+            entry_reason = "пуллбэк к EMA20 в нисходящем тренде"
+
+    if direction is None:
+        return None  # нет точки входа прямо сейчас
+
+    # --- Проверка новостного фона через Claude API ---
+    news_result = news_module.check_news_before_signal(coin)
+    if not news_result["should_trade"]:
+        return None  # опасный новостной фон — не торгуем
+
+    # --- Тренд на 4h как доп. контекст (информационно, не блокирует) ---
+    df_4h = market.get_klines(symbol, "4h", limit=250)
+    df_4h = indicators.add_indicators(df_4h)
+    trend_4h = indicators.get_trend(df_4h)
+
+    # --- Уровни поддержки/сопротивления на 1h ---
+    levels = risk_manager.find_support_resistance(df_1h, lookback=30)
+
+    entry_price = last["close"]
+
+    trade = risk_manager.calculate_trade(
+        direction=direction,
+        entry_price=entry_price,
+        support=levels["support"],
+        resistance=levels["resistance"],
+        deposit=deposit,
+        risk_percent=risk_percent,
+        min_rr=min_rr,
+    )
+
+    if trade is None:
+        return None  # R/R недостаточен или уровни некорректны
+
+    return {
+        "coin": coin,
+        "symbol": symbol,
+        "trend_1h": trend_1h,
+        "trend_4h": trend_4h,
+        "rsi_1h": last["rsi"],
+        "macd_signal_1h": "bullish" if last["macd_diff"] > 0 else "bearish",
+        "entry_reason": entry_reason,
+        "news_sentiment": news_result["sentiment"],
+        "news_risk": news_result["risk_level"],
+        "news_reason": news_result["reason"],
+        "trade": trade,
+    }
 
     # --- Точка входа и тренд на 1h ---
     df_1h = market.get_klines(symbol, "1h", limit=250)
