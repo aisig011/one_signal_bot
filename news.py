@@ -13,6 +13,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+CRYPTOCOMPARE_API_KEY = os.environ.get("CRYPTOCOMPARE_API_KEY")
 NEWS_URL = "https://min-api.cryptocompare.com/data/v2/news/"
 
 # Категории новостей CryptoCompare для каждой монеты
@@ -34,9 +35,15 @@ def get_news(coin: str, limit: int = 5) -> list[dict]:
     """
     category = COIN_CATEGORIES.get(coin.upper(), coin.upper())
     try:
+        params = {"lang": "EN", "categories": category}
+        headers = {}
+        if CRYPTOCOMPARE_API_KEY:
+            headers["authorization"] = f"Apikey {CRYPTOCOMPARE_API_KEY}"
+
         response = requests.get(
             NEWS_URL,
-            params={"lang": "EN", "categories": category},
+            params=params,
+            headers=headers,
             timeout=10,
         )
         logger.info(f"news: GET {response.url} -> status {response.status_code}")
