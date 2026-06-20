@@ -12,36 +12,38 @@ import requests
 logger = logging.getLogger(__name__)
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-NEWS_BASE_URL = "https://cryptocurrency.cv/api/v1"
-
-COIN_KEYWORDS = {
-    "BTC": "Bitcoin BTC",
-    "ETH": "Ethereum ETH",
-    "SOL": "Solana SOL",
-    "BNB": "BNB Binance",
-    "XRP": "XRP Ripple",
-}
+NEWS_BASE_URL = "https://cryptocurrency.cv"
 
 
 def get_news(coin: str, limit: int = 5) -> list[dict]:
-    keyword = COIN_KEYWORDS.get(coin.upper(), coin)
+    """
+    Получает последние новости по монете с cryptocurrency.cv.
+    Эндпоинт: GET /api/news?ticker=BTC
+    Возвращает список статей (title, description, published_at).
+    """
+    ticker = coin.upper()
     try:
         response = requests.get(
-            f"{NEWS_BASE_URL}/news",
-            params={"q": keyword, "limit": limit},
+            f"{NEWS_BASE_URL}/api/news",
+            params={"ticker": ticker, "limit": limit},
             timeout=10,
         )
         response.raise_for_status()
         data = response.json()
-        articles = data.get("data", data.get("articles", data.get("results", [])))
+
+        # Формат ответа: {"articles": [...]}
+        articles = data.get("articles", [])
+
         result = []
         for item in articles[:limit]:
             result.append({
                 "title": item.get("title", ""),
-                "description": item.get("description", item.get("summary", "")),
-                "published_at": item.get("published_at", item.get("publishedAt", "")),
+                "description": item.get("description", item.get("summary", item.get("body", ""))),
+                "published_at": item.get("published_at", item.get("publishedAt", item.get("date", ""))),
+                "source": item.get("source", ""),
             })
         return result
+
     except Exception as e:
         logger.warning(f"news: ошибка получения новостей для {coin}: {e}")
         return []
@@ -125,6 +127,7 @@ def check_news_before_signal(coin: str) -> dict:
         logger.info(f"news: новостей не найдено для {coin}, продолжаю")
         return _default_response()
 
+    logger.info(f"news: получено {len(articles)} новостей для {coin}")
     result = analyze_news_with_openai(coin, articles)
     logger.info(
         f"news: {coin} — sentiment={result['sentiment']}, "
