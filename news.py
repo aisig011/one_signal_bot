@@ -23,16 +23,25 @@ def get_news(coin: str, limit: int = 5) -> list[dict]:
     """
     ticker = coin.upper()
     try:
+        url = f"{NEWS_BASE_URL}/api/news"
         response = requests.get(
-            f"{NEWS_BASE_URL}/api/news",
+            url,
             params={"ticker": ticker, "limit": limit},
+            headers={"User-Agent": "Mozilla/5.0 (signal-bot)"},
             timeout=10,
         )
+        # Диагностика: логируем статус и начало ответа
+        logger.info(f"news: GET {response.url} -> status {response.status_code}")
+        logger.info(f"news: тело ответа (первые 300 симв): {response.text[:300]}")
+
         response.raise_for_status()
         data = response.json()
 
-        # Формат ответа: {"articles": [...]}
-        articles = data.get("articles", [])
+        # Формат ответа может быть {"articles": [...]} или просто [...]
+        if isinstance(data, list):
+            articles = data
+        else:
+            articles = data.get("articles", data.get("data", data.get("results", data.get("items", []))))
 
         result = []
         for item in articles[:limit]:
