@@ -97,17 +97,6 @@ def format_signal_message(result: dict, user: dict) -> str:
     trade = result["trade"]
     direction_emoji = "🟢 LONG" if trade["direction"] == "LONG" else "🔴 SHORT"
 
-    sentiment_emoji = {
-        "positive": "🟢",
-        "neutral": "⚪",
-        "negative": "🔴",
-    }.get(result.get("news_sentiment", "neutral"), "⚪")
-
-    news_line = (
-        f"📰 Новостной фон: {sentiment_emoji} {result.get('news_sentiment', 'neutral')}"
-        f" ({result.get('news_reason', 'нет данных')})\n"
-    )
-
     leverage_note = ""
     if trade["leverage_reduced"]:
         leverage_note = (
@@ -120,8 +109,7 @@ def format_signal_message(result: dict, user: dict) -> str:
         f"📊 Тренд 1h: {result['trend_1h']}\n"
         f"📊 Тренд 4h: {result['trend_4h']}\n"
         f"📈 RSI 1h: {result['rsi_1h']:.1f}\n"
-        f"📍 Причина входа: {result['entry_reason']}\n"
-        f"{news_line}\n"
+        f"📍 Причина входа: {result['entry_reason']}\n\n"
         f"💰 Цена входа: {trade['entry_price']:.4f}\n"
         f"🛑 Стоп-лосс: {trade['stop_loss']:.4f} (-{trade['sl_percent']:.2f}%)\n"
         f"🎯 Тейк-профит 1: {trade['take_profit_1']:.4f} (+{trade['tp1_percent']:.2f}%)\n"
