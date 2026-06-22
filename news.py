@@ -1,12 +1,12 @@
 """
 news.py
-Получение крипто-новостей с CryptoCompare (бесплатно, без ключа,
-не блокирует серверные запросы) и анализ их влияния на рынок
-через OpenAI API (ChatGPT).
+Получение крипто-новостей с CryptoCompare (один запрос за цикл, кэш)
+и анализ их влияния на рынок через OpenAI API (ChatGPT).
 """
 
 import os
 import json
+import time
 import logging
 import requests
 
@@ -16,89 +16,97 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 CRYPTOCOMPARE_API_KEY = os.environ.get("CRYPTOCOMPARE_API_KEY")
 NEWS_URL = "https://min-api.cryptocompare.com/data/v2/news/"
 
-# Категории новостей CryptoCompare для каждой монеты
-COIN_CATEGORIES = {
-    "BTC": "BTC",
-    "ETH": "ETH",
-    "SOL": "SOL",
-    "BNB": "BNB",
-    "XRP": "XRP",
-    "DOGE": "DOGE",
+# Ключевые слова для фильтрации новостей по монете (в заголовке/тексте)
+COIN_FILTERS = {
+    "BTC": ["bitcoin", "btc"],
+    "ETH": ["ethereum", "eth", "ether"],
+    "SOL": ["solana", "sol"],
+    "BNB": ["bnb", "binance coin", "binance"],
+    "XRP": ["xrp", "ripple"],
+    "DOGE": ["dogecoin", "doge"],
 }
 
+# Кэш новостей: храним общий список и время последнего запроса
+_news_cache = {"articles": [], "fetched_at": 0}
+CACHE_TTL_SECONDS = 25 * 60  # 25 минут (чуть меньше интервала сканирования)
 
-def get_news(coin: str, limit: int = 5) -> list[dict]:
+
+def _fetch_all_news() -> list[dict]:
     """
-    Получает последние новости по монете с CryptoCompare.
-    Эндпоинт: GET /data/v2/news/?lang=EN&categories=BTC
-    Возвращает список статей (title, description, published_at).
+    Делает ОДИН запрос к CryptoCompare за общим потоком новостей.
+    Результат кэшируется на CACHE_TTL_SECONDS, чтобы не упираться
+    в rate limit бесплатного ключа.
     """
-    category = COIN_CATEGORIES.get(coin.upper(), coin.upper())
+    now = time.time()
+    if _news_cache["articles"] and (now - _news_cache["fetched_at"] < CACHE_TTL_SECONDS):
+        logger.info("news: использую кэш новостей")
+        return _news_cache["articles"]
+
     try:
-        params = {"lang": "EN", "categories": category}
         headers = {}
         if CRYPTOCOMPARE_API_KEY:
             headers["authorization"] = f"Apikey {CRYPTOCOMPARE_API_KEY}"
 
-        response = requests.get(
-            NEWS_URL,
-            params=params,
-            headers=headers,
-            timeout=10,
-        )
+        response = requests.get(NEWS_URL, params={"lang": "EN"}, headers=headers, timeout=10)
         logger.info(f"news: GET {response.url} -> status {response.status_code}")
         response.raise_for_status()
         data = response.json()
 
-        # CryptoCompare может вернуть данные в разных форматах.
-        # Обычный формат: {"Data": [ {...}, {...} ]}
-        # Но иногда "Data" — это словарь или данные лежат в другом месте.
-        articles_raw = None
+        if isinstance(data, dict) and data.get("Response") == "Error":
+            logger.warning(f"news: CryptoCompare ошибка: {data.get('Message', '')}")
+            # Если есть старый кэш — лучше вернуть его, чем ничего
+            return _news_cache["articles"]
 
-        if isinstance(data, dict):
-            # Проверка на rate limit (CryptoCompare возвращает Response: Error)
-            if data.get("Response") == "Error":
-                logger.warning(f"news: CryptoCompare вернул ошибку для {coin}: {data.get('Message', '')}")
-                return []
+        raw = data.get("Data", []) if isinstance(data, dict) else data
+        if not isinstance(raw, list):
+            logger.warning(f"news: неожиданный формат, тип Data: {type(raw).__name__}")
+            return _news_cache["articles"]
 
-            candidate = data.get("Data")
-            logger.info(f"news: тип Data для {coin}: {type(candidate).__name__}")
-
-            if isinstance(candidate, list):
-                articles_raw = candidate
-            elif isinstance(candidate, dict):
-                for key in ("articles", "items", "results", "data", "Data"):
-                    if isinstance(candidate.get(key), list):
-                        articles_raw = candidate[key]
-                        break
-        elif isinstance(data, list):
-            articles_raw = data
-
-        if not isinstance(articles_raw, list):
-            logger.warning(
-                f"news: неожиданный формат ответа для {coin}, "
-                f"ключи: {list(data.keys()) if isinstance(data, dict) else type(data)}"
-            )
-            return []
-
-        result = []
-        for item in articles_raw[:limit]:
+        articles = []
+        for item in raw:
             if not isinstance(item, dict):
                 continue
-            body = item.get("body", "") or ""
-            result.append({
-                "title": item.get("title", ""),
-                "description": body[:300],
-                "published_at": item.get("published_on", ""),
-                "source": item.get("source", ""),
+            articles.append({
+                "title": item.get("title", "") or "",
+                "body": (item.get("body", "") or "")[:300],
+                "categories": (item.get("categories", "") or "").lower(),
+                "tags": (item.get("tags", "") or "").lower(),
             })
 
-        logger.info(f"news: получено {len(result)} новостей для {coin}")
-        return result
+        _news_cache["articles"] = articles
+        _news_cache["fetched_at"] = now
+        logger.info(f"news: загружено {len(articles)} новостей (общий поток)")
+        return articles
 
     except Exception as e:
-        logger.warning(f"news: ошибка получения новостей для {coin}: {e}")
+        logger.warning(f"news: ошибка запроса новостей: {e}")
+        return _news_cache["articles"]
+
+
+def get_news(coin: str, limit: int = 5) -> list[dict]:
+    """
+    Возвращает новости, относящиеся к конкретной монете, отфильтровав
+    общий поток по ключевым словам.
+    """
+    all_articles = _fetch_all_news()
+    if not all_articles:
         return []
+
+    keywords = COIN_FILTERS.get(coin.upper(), [coin.lower()])
+
+    matched = []
+    for art in all_articles:
+        haystack = f"{art['title']} {art['body']} {art['categories']} {art['tags']}".lower()
+        if any(kw in haystack for kw in keywords):
+            matched.append({
+                "title": art["title"],
+                "description": art["body"],
+            })
+        if len(matched) >= limit:
+            break
+
+    logger.info(f"news: для {coin} найдено {len(matched)} релевантных новостей")
+    return matched
 
 
 def analyze_news_with_openai(coin: str, articles: list[dict]) -> dict:
