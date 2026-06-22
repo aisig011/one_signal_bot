@@ -8,7 +8,6 @@ signals.py
 import market
 import indicators
 import risk_manager
-import news as news_module
 
 
 def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 2.0) -> dict | None:
@@ -92,11 +91,6 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
     if direction is None:
         return None  # нет точки входа прямо сейчас
 
-    # --- Проверка новостного фона через Claude API ---
-    news_result = news_module.check_news_before_signal(coin)
-    if not news_result["should_trade"]:
-        return None  # опасный новостной фон — не торгуем
-
     # --- Тренд на 4h как доп. контекст (информационно, не блокирует) ---
     df_4h = market.get_klines(symbol, "4h", limit=250)
     df_4h = indicators.add_indicators(df_4h)
@@ -128,8 +122,5 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
         "rsi_1h": last["rsi"],
         "macd_signal_1h": "bullish" if last["macd_diff"] > 0 else "bearish",
         "entry_reason": entry_reason,
-        "news_sentiment": news_result["sentiment"],
-        "news_risk": news_result["risk_level"],
-        "news_reason": news_result["reason"],
         "trade": trade,
     }
