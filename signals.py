@@ -24,7 +24,7 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
        - Разворот: RSI выходит из зоны перепроданности/перекупленности
          (был <35/>65, сейчас разворачивается)
        - Пересечение MACD сигнальной линии в сторону тренда
-       - Пуллбэк: цена откатилась близко к EMA20 (в пределах 0.5%)
+       - Пуллбэк: цена откатилась близко к EMA20 (в пределах 1.2%)
          в рамках тренда, и RSI не в противоположной крайней зоне
          (для LONG: RSI < 65; для SHORT: RSI > 35) — классический
          вход "по тренду на откате"
@@ -52,7 +52,7 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
 
     # Расстояние цены от EMA20 в процентах (для пуллбэк-условия)
     ema20_distance_pct = abs(last["close"] - last["ema_20"]) / last["ema_20"] * 100
-    near_ema20 = ema20_distance_pct <= 0.5
+    near_ema20 = ema20_distance_pct <= 1.2
 
     if trend_1h == "bullish":
         # Разворот из перепроданности
