@@ -39,13 +39,23 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
     df_1h = market.get_klines(symbol, "1h", limit=250)
     df_1h = indicators.add_indicators(df_1h)
 
-    trend_1h = indicators.get_trend(df_1h)
+    import logging
+    logger = logging.getLogger("signals")
 
-    if trend_1h == "flat":
-        return None  # нет чёткого тренда на 1h — не торгуем
+    trend_1h = indicators.get_trend(df_1h)
 
     last = df_1h.iloc[-1]
     prev = df_1h.iloc[-2]
+
+    ema20_dist = abs(last["close"] - last["ema_20"]) / last["ema_20"] * 100
+    logger.info(
+        f"diag {coin}: trend_1h={trend_1h}, rsi={last['rsi']:.1f}, "
+        f"macd_diff={last['macd_diff']:.4f} (prev {prev['macd_diff']:.4f}), "
+        f"ema20_dist={ema20_dist:.2f}%"
+    )
+
+    if trend_1h == "flat":
+        return None  # нет чёткого тренда на 1h — не торгуем
 
     direction = None
     entry_reason = None
