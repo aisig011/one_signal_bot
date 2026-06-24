@@ -576,6 +576,39 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 # ============================================================
+#  Обработчик кнопки "Вошёл в сделку"
+# ============================================================
+async def entered_trade_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    # callback_data вида "entered_123"
+    try:
+        signal_id = int(query.data.split("_")[1])
+    except (IndexError, ValueError):
+        return
+
+    sig = storage.get_pending_signal(signal_id)
+    if sig is None:
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text("⚠️ Не удалось найти данные сигнала (возможно, он устарел).")
+        return
+
+    # Сохраняем как активную сделку для отслеживания
+    storage.add_active_trade(
+        sig["user_id"], sig["coin"], sig["symbol"], sig["direction"],
+        sig["entry_price"], sig["stop_loss"], sig["take_profit_1"],
+    )
+
+    # Убираем кнопку и подтверждаем
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        f"✅ Сделка {sig['coin']}/USDT {sig['direction']} взята в отслеживание.\n"
+        f"Я пришлю уведомление, когда цена достигнет 🎯 тейк-профита или 🛑 стоп-лосса."
+    )
+
+
+# ============================================================
 #  Глобальный обработчик ошибок — чтобы ошибки в job_queue
 #  (фоновом сканировании) не "проглатывались" молча
 # ============================================================
@@ -655,6 +688,9 @@ def main():
     app.add_handler(CommandHandler("check", check_command))
     app.add_handler(CommandHandler("signal", signal_command))
 
+    # Кнопка "Вошёл в сделку" под сигналом
+    app.add_handler(CallbackQueryHandler(entered_trade_button, pattern="^entered_"))
+
     # Обработчик кнопок главного меню и текстовых сообщений — последним,
     # чтобы не перехватывать диалоги выше
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
@@ -665,7 +701,13 @@ def main():
     job_queue.run_repeating(
         scheduler.scan_market,
         interval=scheduler.SCAN_INTERVAL_SECONDS,
-        first=10,  # первая проверка через 10 секунд после запуска (для быстрой проверки)
+        first=10,  # первая проверка через 10 секунд после запуска
+    )
+    # --- Отслеживание активных сделок (TP/SL) каждые 2 минуты ---
+    job_queue.run_repeating(
+        scheduler.check_active_trades,
+        interval=120,
+        first=30,
     )
 
     logger.info("Бот запущен")
