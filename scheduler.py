@@ -104,12 +104,17 @@ def format_signal_message(result: dict, user: dict) -> str:
             f"для безопасного запаса до ликвидации"
         )
 
+    volume_line = ""
+    if result.get("volume_ratio"):
+        volume_line = f"📊 Объём: x{result['volume_ratio']:.1f} от среднего\n"
+
     return (
         f"🚀 *НОВЫЙ СИГНАЛ: {result['coin']}/USDT {direction_emoji}*\n\n"
         f"📊 Тренд 1h: {result['trend_1h']}\n"
         f"📊 Тренд 4h: {result['trend_4h']}\n"
         f"📈 RSI 1h: {result['rsi_1h']:.1f}\n"
-        f"📍 Причина входа: {result['entry_reason']}\n\n"
+        f"📍 Причина входа: {result['entry_reason']}\n"
+        f"{volume_line}\n"
         f"💰 Цена входа: {trade['entry_price']:.4f}\n"
         f"🛑 Стоп-лосс: {trade['stop_loss']:.4f} (-{trade['sl_percent']:.2f}%)\n"
         f"🎯 Тейк-профит 1: {trade['take_profit_1']:.4f} (+{trade['tp1_percent']:.2f}%)\n"
