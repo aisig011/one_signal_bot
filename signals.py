@@ -5,6 +5,8 @@ signals.py
 на 1h по RSI/MACD/EMA.
 """
 
+import pandas as pd
+
 import market
 import indicators
 import risk_manager
@@ -101,6 +103,18 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
     if direction is None:
         return None  # нет точки входа прямо сейчас
 
+    # --- Подтверждение объёмом ---
+    # Движение считается подтверждённым, если объём на свече входа
+    # не ниже среднего за 20 свечей. Это отсекает ложные пробои на
+    # низком объёме (множитель 1.0 = просто не ниже среднего).
+    volume_confirmed = True
+    if "volume_avg" in df_1h.columns and not pd.isna(last.get("volume_avg")):
+        volume_ratio = last["volume"] / last["volume_avg"] if last["volume_avg"] > 0 else 0
+        volume_confirmed = volume_ratio >= 1.0
+        logger.info(f"diag {coin}: volume_ratio={volume_ratio:.2f}, confirmed={volume_confirmed}")
+        if not volume_confirmed:
+            return None  # объём не подтверждает движение — пропускаем
+
     # --- Тренд на 4h как доп. контекст (информационно, не блокирует) ---
     df_4h = market.get_klines(symbol, "4h", limit=250)
     df_4h = indicators.add_indicators(df_4h)
@@ -132,5 +146,6 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
         "rsi_1h": last["rsi"],
         "macd_signal_1h": "bullish" if last["macd_diff"] > 0 else "bearish",
         "entry_reason": entry_reason,
+        "volume_ratio": (last["volume"] / last["volume_avg"]) if ("volume_avg" in df_1h.columns and not pd.isna(last.get("volume_avg")) and last["volume_avg"] > 0) else None,
         "trade": trade,
     }
