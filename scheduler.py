@@ -6,10 +6,12 @@ scheduler.py
 
 import logging
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 import storage
 import signals
+import market
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +81,20 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
             text = format_signal_message(result, user)
 
             try:
+                # Сохраняем сигнал и создаём кнопку "Вошёл" с его id
+                signal_id = storage.save_pending_signal(
+                    user["user_id"], coin, result["symbol"], direction,
+                    entry_price, trade["stop_loss"], trade["take_profit_1"],
+                )
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Вошёл в сделку", callback_data=f"entered_{signal_id}")
+                ]])
+
                 await context.bot.send_message(
                     chat_id=user["user_id"],
                     text=text,
                     parse_mode="Markdown",
+                    reply_markup=keyboard,
                 )
                 storage.mark_signal_sent(user["user_id"], coin, direction, entry_price)
                 logger.info(f"scan_market: сигнал {coin} {direction} отправлен пользователю {user['user_id']}")
@@ -90,6 +102,77 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.warning(f"scan_market: не удалось отправить сообщение пользователю {user['user_id']}: {e}", exc_info=True)
 
     logger.info("scan_market: сканирование завершено")
+
+
+async def check_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Проверяет активные сделки (которые пользователь подтвердил кнопкой
+    'Вошёл') — достигла ли цена TP или SL, и присылает уведомление.
+    """
+    try:
+        trades = storage.get_all_active_trades()
+    except Exception as e:
+        logger.error(f"check_active_trades: ошибка получения сделок: {e}", exc_info=True)
+        return
+
+    if not trades:
+        return
+
+    # Кэш цен, чтобы не запрашивать одну монету несколько раз
+    price_cache = {}
+
+    for t in trades:
+        symbol = t["symbol"]
+        try:
+            if symbol not in price_cache:
+                price_cache[symbol] = market.get_current_price(symbol)
+            price = price_cache[symbol]
+        except Exception as e:
+            logger.warning(f"check_active_trades: не удалось получить цену {symbol}: {e}")
+            continue
+
+        direction = t["direction"]
+        hit_tp = False
+        hit_sl = False
+
+        if direction == "LONG":
+            if price >= t["take_profit_1"]:
+                hit_tp = True
+            elif price <= t["stop_loss"]:
+                hit_sl = True
+        else:  # SHORT
+            if price <= t["take_profit_1"]:
+                hit_tp = True
+            elif price >= t["stop_loss"]:
+                hit_sl = True
+
+        if not (hit_tp or hit_sl):
+            continue
+
+        # Считаем результат в процентах от цены входа
+        if hit_tp:
+            pct = abs(t["take_profit_1"] - t["entry_price"]) / t["entry_price"] * 100
+            msg = (
+                f"🎯 *ТЕЙК-ПРОФИТ взят!* {t['coin']}/USDT {direction}\n\n"
+                f"Цена достигла {t['take_profit_1']:.4f} (+{pct:.2f}%)\n"
+                f"Поздравляю с прибыльной сделкой! 🟢"
+            )
+        else:
+            pct = abs(t["stop_loss"] - t["entry_price"]) / t["entry_price"] * 100
+            msg = (
+                f"🛑 *СТОП-ЛОСС сработал* {t['coin']}/USDT {direction}\n\n"
+                f"Цена достигла {t['stop_loss']:.4f} (-{pct:.2f}%)\n"
+                f"Это часть торговли — следующая сделка может быть прибыльной. 🔴"
+            )
+
+        try:
+            await context.bot.send_message(
+                chat_id=t["user_id"], text=msg, parse_mode="Markdown"
+            )
+            storage.remove_active_trade(t["id"])
+            logger.info(f"check_active_trades: {t['coin']} {direction} — {'TP' if hit_tp else 'SL'}, уведомление отправлено")
+        except Exception as e:
+            logger.warning(f"check_active_trades: ошибка отправки: {e}")
 
 
 def format_signal_message(result: dict, user: dict) -> str:
