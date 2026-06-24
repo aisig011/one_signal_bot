@@ -105,12 +105,12 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
 
     # --- Подтверждение объёмом ---
     # Движение считается подтверждённым, если объём на свече входа
-    # не ниже среднего за 20 свечей. Это отсекает ложные пробои на
-    # низком объёме (множитель 1.0 = просто не ниже среднего).
+    # не ниже 70% от среднего за 20 свечей. Это отсекает совсем вялые
+    # движения на мёртвом объёме, но не блокирует нормальные сигналы.
     volume_confirmed = True
     if "volume_avg" in df_1h.columns and not pd.isna(last.get("volume_avg")):
         volume_ratio = last["volume"] / last["volume_avg"] if last["volume_avg"] > 0 else 0
-        volume_confirmed = volume_ratio >= 1.0
+        volume_confirmed = volume_ratio >= 0.7
         logger.info(f"diag {coin}: volume_ratio={volume_ratio:.2f}, confirmed={volume_confirmed}")
         if not volume_confirmed:
             return None  # объём не подтверждает движение — пропускаем
