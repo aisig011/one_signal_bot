@@ -191,12 +191,22 @@ def format_signal_message(result: dict, user: dict) -> str:
     if result.get("volume_ratio"):
         volume_line = f"📊 Объём: x{result['volume_ratio']:.1f} от среднего\n"
 
+    phase_line = ""
+    if result.get("market_phase"):
+        phase_names = {
+            "TREND_UP": "восходящий тренд",
+            "TREND_DOWN": "нисходящий тренд",
+            "RANGE": "боковик",
+        }
+        phase_line = f"🌐 Фаза рынка: {phase_names.get(result['market_phase'], result['market_phase'])}\n"
+
     return (
         f"🚀 *НОВЫЙ СИГНАЛ: {result['coin']}/USDT {direction_emoji}*\n\n"
         f"📊 Тренд 1h: {result['trend_1h']}\n"
         f"📊 Тренд 4h: {result['trend_4h']}\n"
         f"📈 RSI 1h: {result['rsi_1h']:.1f}\n"
         f"📍 Причина входа: {result['entry_reason']}\n"
+        f"{phase_line}"
         f"{volume_line}\n"
         f"💰 Цена входа: {trade['entry_price']:.4f}\n"
         f"🛑 Стоп-лосс: {trade['stop_loss']:.4f} (-{trade['sl_percent']:.2f}%)\n"
