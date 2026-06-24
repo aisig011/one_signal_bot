@@ -37,6 +37,118 @@ def init_db():
             PRIMARY KEY (user_id, coin, direction)
         )
     """)
+    # Отправленные сигналы — чтобы кнопка "Вошёл" могла по короткому id
+    # достать все параметры сделки (callback_data ограничен 64 байтами).
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pending_signals (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            coin TEXT,
+            symbol TEXT,
+            direction TEXT,
+            entry_price REAL,
+            stop_loss REAL,
+            take_profit_1 REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # Активные сделки, которые пользователь подтвердил кнопкой "Вошёл".
+    # Бот отслеживает их и присылает уведомление при достижении TP или SL.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS active_trades (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            coin TEXT,
+            symbol TEXT,
+            direction TEXT,
+            entry_price REAL,
+            stop_loss REAL,
+            take_profit_1 REAL,
+            opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def save_pending_signal(user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1) -> int:
+    """Сохраняет отправленный сигнал, возвращает его id для кнопки 'Вошёл'."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO pending_signals
+        (user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+    """, (user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1))
+    new_id = cursor.fetchone()[0]
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return new_id
+
+
+def get_pending_signal(signal_id: int):
+    """Достаёт сохранённый сигнал по id (для кнопки 'Вошёл')."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1
+        FROM pending_signals WHERE id = %s
+    """, (signal_id,))
+    r = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    if r is None:
+        return None
+    return {
+        "id": r[0], "user_id": r[1], "coin": r[2], "symbol": r[3],
+        "direction": r[4], "entry_price": r[5], "stop_loss": r[6],
+        "take_profit_1": r[7],
+    }
+
+
+def add_active_trade(user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1):
+    """Сохраняет сделку для отслеживания после нажатия кнопки 'Вошёл'."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO active_trades
+        (user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """, (user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def get_all_active_trades():
+    """Возвращает все активные сделки для отслеживания."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1
+        FROM active_trades
+    """)
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return [
+        {
+            "id": r[0], "user_id": r[1], "coin": r[2], "symbol": r[3],
+            "direction": r[4], "entry_price": r[5], "stop_loss": r[6],
+            "take_profit_1": r[7],
+        }
+        for r in rows
+    ]
+
+
+def remove_active_trade(trade_id):
+    """Удаляет сделку из отслеживания (после TP/SL)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM active_trades WHERE id = %s", (trade_id,))
     conn.commit()
     cursor.close()
     conn.close()
