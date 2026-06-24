@@ -10,6 +10,7 @@ import pandas as pd
 import market
 import indicators
 import risk_manager
+import market_phase
 
 
 def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 2.0) -> dict | None:
@@ -55,6 +56,13 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
         f"macd_diff={last['macd_diff']:.4f} (prev {prev['macd_diff']:.4f}), "
         f"ema20_dist={ema20_dist:.2f}%"
     )
+
+    # --- Определение фазы рынка через ИИ (пока только логируем) ---
+    # На этом этапе фаза не влияет на сигналы — мы проверяем, насколько
+    # точно ИИ распознаёт обстановку. Следующим шагом добавим вторую
+    # стратегию под RANGE и блокировку при CHAOS.
+    phase_info = market_phase.detect_phase(coin, df_1h)
+    logger.info(f"diag {coin}: market_phase={phase_info['phase']} ({phase_info['reason']})")
 
     if trend_1h == "flat":
         return None  # нет чёткого тренда на 1h — не торгуем
