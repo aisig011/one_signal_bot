@@ -34,6 +34,12 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["macd_signal"] = macd_calc.macd_signal()
     df["macd_diff"] = macd_calc.macd_diff()  # гистограмма (macd - signal)
 
+    # Средний объём за 20 свечей — для подтверждения движения объёмом.
+    # Если объём на текущей свече заметно выше среднего, движение
+    # считается подтверждённым (меньше шанс ложного пробоя).
+    if "volume" in df.columns:
+        df["volume_avg"] = df["volume"].rolling(window=20).mean()
+
     return df
 
 
