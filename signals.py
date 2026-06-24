@@ -57,12 +57,22 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
         f"ema20_dist={ema20_dist:.2f}%"
     )
 
-    # --- Определение фазы рынка через ИИ (пока только логируем) ---
-    # На этом этапе фаза не влияет на сигналы — мы проверяем, насколько
-    # точно ИИ распознаёт обстановку. Следующим шагом добавим вторую
-    # стратегию под RANGE и блокировку при CHAOS.
+    # --- Определение фазы рынка через ИИ ---
     phase_info = market_phase.detect_phase(coin, df_1h)
-    logger.info(f"diag {coin}: market_phase={phase_info['phase']} ({phase_info['reason']})")
+    phase = phase_info["phase"]
+    logger.info(f"diag {coin}: market_phase={phase} ({phase_info['reason']})")
+
+    # CHAOS — высокая волатильность/неопределённость, не торгуем
+    if phase == "CHAOS":
+        logger.info(f"diag {coin}: пропуск — фаза CHAOS")
+        return None
+
+    # Экстремальная перепроданность/перекупленность в тренде — опасный
+    # момент: вход против тренда (ловля дна/хая) или поздний вход по тренду.
+    # Лучше переждать, пока RSI не вернётся в рабочую зону.
+    if last["rsi"] < 25 or last["rsi"] > 75:
+        logger.info(f"diag {coin}: пропуск — экстремальный RSI {last['rsi']:.1f}")
+        return None
 
     if trend_1h == "flat":
         return None  # нет чёткого тренда на 1h — не торгуем
@@ -154,6 +164,7 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
         "rsi_1h": last["rsi"],
         "macd_signal_1h": "bullish" if last["macd_diff"] > 0 else "bearish",
         "entry_reason": entry_reason,
+        "market_phase": phase,
         "volume_ratio": (last["volume"] / last["volume_avg"]) if ("volume_avg" in df_1h.columns and not pd.isna(last.get("volume_avg")) and last["volume_avg"] > 0) else None,
         "trade": trade,
     }
