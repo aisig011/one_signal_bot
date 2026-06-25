@@ -179,6 +179,7 @@ def format_signal_message(result: dict, user: dict) -> str:
     """Форматирует сигнал в текст сообщения (используется и в /signal, и в scheduler)."""
     trade = result["trade"]
     direction_emoji = "🟢 LONG" if trade["direction"] == "LONG" else "🔴 SHORT"
+    is_range = result.get("market_phase") == "RANGE"
 
     leverage_note = ""
     if trade["leverage_reduced"]:
@@ -191,19 +192,33 @@ def format_signal_message(result: dict, user: dict) -> str:
     if result.get("volume_ratio"):
         volume_line = f"📊 Объём: x{result['volume_ratio']:.1f} от среднего\n"
 
-    phase_line = ""
-    if result.get("market_phase"):
-        phase_names = {
-            "TREND_UP": "восходящий тренд",
-            "TREND_DOWN": "нисходящий тренд",
-            "RANGE": "боковик",
-        }
-        phase_line = f"🌐 Фаза рынка: {phase_names.get(result['market_phase'], result['market_phase'])}\n"
+    phase_names = {
+        "TREND_UP": "восходящий тренд ↗️",
+        "TREND_DOWN": "нисходящий тренд ↘️",
+        "RANGE": "боковик ↔️",
+    }
+    phase_str = phase_names.get(result.get("market_phase", ""), result.get("market_phase", ""))
+    phase_line = f"🌐 Фаза рынка: {phase_str}\n"
+
+    # Строка с контекстом тренда — для RANGE показываем границы диапазона,
+    # для тренда — тренды 1h/4h как раньше
+    if is_range:
+        ri = result.get("range_info", {})
+        context_lines = (
+            f"📏 Диапазон: {ri.get('low', 0):.4f} — {ri.get('high', 0):.4f} "
+            f"(ширина {ri.get('width_pct', 0):.1f}%)\n"
+            f"🎯 Цель TP: {ri.get('tp_target', '')}\n"
+        )
+    else:
+        trend_4h_str = result["trend_4h"] if result.get("trend_4h") else "—"
+        context_lines = (
+            f"📊 Тренд 1h: {result['trend_1h']}\n"
+            f"📊 Тренд 4h: {trend_4h_str}\n"
+        )
 
     return (
         f"🚀 *НОВЫЙ СИГНАЛ: {result['coin']}/USDT {direction_emoji}*\n\n"
-        f"📊 Тренд 1h: {result['trend_1h']}\n"
-        f"📊 Тренд 4h: {result['trend_4h']}\n"
+        f"{context_lines}"
         f"📈 RSI 1h: {result['rsi_1h']:.1f}\n"
         f"📍 Причина входа: {result['entry_reason']}\n"
         f"{phase_line}"
