@@ -474,7 +474,15 @@ async def search_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         found_any = True
         text = scheduler.format_signal_message(result, user)
-        await update.message.reply_text(text, parse_mode="Markdown")
+        trade = result["trade"]
+        signal_id = storage.save_pending_signal(
+            user["user_id"], result["coin"], result["symbol"], trade["direction"],
+            trade["entry_price"], trade["stop_loss"], trade["take_profit_1"],
+        )
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Вошёл в сделку", callback_data=f"entered_{signal_id}")
+        ]])
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
     if not found_any:
         await update.message.reply_text(
@@ -529,7 +537,15 @@ async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     text = scheduler.format_signal_message(result, user)
-    await update.message.reply_text(text, parse_mode="Markdown")
+    trade = result["trade"]
+    signal_id = storage.save_pending_signal(
+        user["user_id"], result["coin"], result["symbol"], trade["direction"],
+        trade["entry_price"], trade["stop_loss"], trade["take_profit_1"],
+    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Вошёл в сделку", callback_data=f"entered_{signal_id}")
+    ]])
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 
 # ============================================================
