@@ -81,7 +81,7 @@ def save_pending_signal(user_id, coin, symbol, direction, entry_price, stop_loss
         (user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING id
-    """, (user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1))
+    """, (user_id, coin, symbol, direction, float(entry_price), float(stop_loss), float(take_profit_1)))
     new_id = cursor.fetchone()[0]
     conn.commit()
     cursor.close()
