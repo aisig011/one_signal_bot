@@ -90,12 +90,14 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                     InlineKeyboardButton("✅ Вошёл в сделку", callback_data=f"entered_{signal_id}")
                 ]])
 
-                await context.bot.send_message(
+                sent_msg = await context.bot.send_message(
                     chat_id=user["user_id"],
                     text=text,
                     parse_mode="Markdown",
                     reply_markup=keyboard,
                 )
+                # Сохраняем message_id чтобы TP/SL могли сделать reply
+                storage.update_pending_signal_message_id(signal_id, sent_msg.message_id)
                 storage.mark_signal_sent(user["user_id"], coin, direction, entry_price)
                 logger.info(f"scan_market: сигнал {coin} {direction} отправлен пользователю {user['user_id']}")
             except Exception as e:
@@ -167,7 +169,10 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         try:
             await context.bot.send_message(
-                chat_id=t["user_id"], text=msg, parse_mode="Markdown"
+                chat_id=t["user_id"],
+                text=msg,
+                parse_mode="Markdown",
+                reply_to_message_id=t.get("signal_message_id"),
             )
             storage.remove_active_trade(t["id"])
             logger.info(f"check_active_trades: {t['coin']} {direction} — {'TP' if hit_tp else 'SL'}, уведомление отправлено")
