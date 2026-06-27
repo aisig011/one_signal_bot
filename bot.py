@@ -482,7 +482,8 @@ async def search_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Вошёл в сделку", callback_data=f"entered_{signal_id}")
         ]])
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        sent_msg = await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        storage.update_pending_signal_message_id(signal_id, sent_msg.message_id)
 
     if not found_any:
         await update.message.reply_text(
@@ -545,7 +546,8 @@ async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Вошёл в сделку", callback_data=f"entered_{signal_id}")
     ]])
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    sent_msg = await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    storage.update_pending_signal_message_id(signal_id, sent_msg.message_id)
 
 
 # ============================================================
@@ -611,9 +613,12 @@ async def entered_trade_button(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # Сохраняем как активную сделку для отслеживания
+    # Берём message_id сигнала для последующего reply в TP/SL уведомлении
+    signal_msg_id = sig.get("message_id")
     storage.add_active_trade(
         sig["user_id"], sig["coin"], sig["symbol"], sig["direction"],
         sig["entry_price"], sig["stop_loss"], sig["take_profit_1"],
+        signal_message_id=signal_msg_id,
     )
 
     # Убираем кнопку и подтверждаем
