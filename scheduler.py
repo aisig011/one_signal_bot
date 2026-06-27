@@ -73,6 +73,11 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             logger.info(f"scan_market: {coin} — НАЙДЕН сигнал {direction} @ {entry_price}")
 
+            # Защита: уже есть активная сделка по этой монете — не дублируем
+            if storage.has_active_trade(user["user_id"], coin):
+                logger.info(f"scan_market: {coin} — уже есть активная сделка, пропускаю")
+                continue
+
             # Проверяем, не отправляли ли уже похожий сигнал недавно
             if storage.was_signal_sent_recently(user["user_id"], coin, direction, entry_price):
                 logger.info(f"scan_market: {coin} {direction} — уже отправлялся недавно, пропускаю")
