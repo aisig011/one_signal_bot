@@ -193,6 +193,13 @@ def format_signal_message(result: dict, user: dict) -> str:
             f"для безопасного запаса до ликвидации"
         )
 
+    margin_note = ""
+    if trade.get("margin_capped"):
+        margin_note = (
+            f"\nℹ️ Размер позиции уменьшен, чтобы маржа влезла в 40% депозита. "
+            f"Реальный риск меньше {user['risk_percent']}% — это безопаснее."
+        )
+
     volume_line = ""
     if result.get("volume_ratio"):
         volume_line = f"📊 Объём: x{result['volume_ratio']:.1f} от среднего\n"
@@ -240,4 +247,5 @@ def format_signal_message(result: dict, user: dict) -> str:
         f"💵 Маржа: {trade['margin_required']:.2f} USDT\n"
         f"💀 Цена ликвидации: {trade['liquidation_price']:.4f}"
         f"{leverage_note}"
+        f"{margin_note}"
     )
