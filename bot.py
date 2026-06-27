@@ -472,11 +472,23 @@ async def search_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if result is None:
             continue
 
+        trade = result["trade"]
+        direction = trade["direction"]
+
+        # Защита 1: уже есть активная сделка по этой монете — не дублируем
+        if storage.has_active_trade(user["user_id"], result["coin"]):
+            logger.info(f"search_signal: {result['coin']} — уже есть активная сделка, пропускаю")
+            continue
+
+        # Защита 2: сигнал по монете+направлению уже слали за последние 4 часа
+        if storage.was_signal_sent_recently(user["user_id"], result["coin"], direction):
+            logger.info(f"search_signal: {result['coin']} {direction} — уже отправлялся недавно, пропускаю")
+            continue
+
         found_any = True
         text = scheduler.format_signal_message(result, user)
-        trade = result["trade"]
         signal_id = storage.save_pending_signal(
-            user["user_id"], result["coin"], result["symbol"], trade["direction"],
+            user["user_id"], result["coin"], result["symbol"], direction,
             float(trade["entry_price"]), float(trade["stop_loss"]), float(trade["take_profit_1"]),
         )
         keyboard = InlineKeyboardMarkup([[
@@ -484,6 +496,7 @@ async def search_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         ]])
         sent_msg = await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
         storage.update_pending_signal_message_id(signal_id, sent_msg.message_id)
+        storage.mark_signal_sent(user["user_id"], result["coin"], direction, float(trade["entry_price"]))
 
     if not found_any:
         await update.message.reply_text(
