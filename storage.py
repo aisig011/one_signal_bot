@@ -163,6 +163,21 @@ def get_all_active_trades():
     ]
 
 
+def has_active_trade(user_id: int, coin: str) -> bool:
+    """Проверяет, есть ли уже активная (отслеживаемая) сделка по монете."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT 1 FROM active_trades
+        WHERE user_id = %s AND coin = %s
+        LIMIT 1
+    """, (user_id, coin))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return row is not None
+
+
 def remove_active_trade(trade_id):
     """Удаляет сделку из отслеживания (после TP/SL)."""
     conn = get_connection()
