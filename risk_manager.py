@@ -6,14 +6,19 @@ risk_manager.py
 
 import pandas as pd
 
+# Максимальная доля депозита, которую можно выделить под маржу одной сделки.
+# Защищает от ситуации, когда близкий стоп раздувает позицию до всего депозита.
+MAX_MARGIN_FRACTION = 0.40  # 40% депозита
+
+# Максимальный R/R — если TP оказывается дальше, обрезаем его до этого уровня.
+# 1:16 нереалистично: цена редко проходит весь диапазон без отката.
+MAX_RR = 6.0
+
 
 def find_support_resistance(df: pd.DataFrame, lookback: int = 30) -> dict:
     """
     Находит последние локальные минимум и максимум за `lookback` свечей —
     это будущие уровни поддержки и сопротивления.
-
-    df: DataFrame со свечами (нужны колонки 'high', 'low')
-    lookback: сколько последних свечей анализировать
     """
     recent = df.tail(lookback)
     return {
@@ -25,13 +30,6 @@ def find_support_resistance(df: pd.DataFrame, lookback: int = 30) -> dict:
 def calculate_liquidation_price(direction: str, entry_price: float, leverage: int, maintenance_margin_rate: float = 0.005) -> float:
     """
     Приблизительная цена ликвидации для изолированной маржи на Binance Futures.
-
-    Формула упрощённая (без учёта комиссий и финансирования):
-    LONG:  liq_price = entry_price * (1 - 1/leverage + maintenance_margin_rate)
-    SHORT: liq_price = entry_price * (1 + 1/leverage - maintenance_margin_rate)
-
-    maintenance_margin_rate: ставка поддерживающей маржи (~0.5% для
-    большинства пар на средних плечах — консервативная оценка).
     """
     if direction == "LONG":
         return entry_price * (1 - 1 / leverage + maintenance_margin_rate)
@@ -42,12 +40,7 @@ def calculate_liquidation_price(direction: str, entry_price: float, leverage: in
 def find_safe_leverage(direction: str, entry_price: float, stop_loss: float, max_leverage: int = 5, safety_margin: float = 1.3) -> int:
     """
     Подбирает максимально допустимое плечо так, чтобы цена ликвидации
-    была дальше стоп-лосса с запасом `safety_margin` (например 1.3 =
-    ликвидация на 30% дальше от входа, чем стоп-лосс).
-
-    Перебирает плечи от max_leverage вниз до 1, возвращает первое
-    подходящее. Если даже x1 не даёт запаса (крайне маловероятно
-    для разумных стопов) — возвращает 1.
+    была дальше стоп-лосса с запасом `safety_margin`.
     """
     risk_distance = abs(entry_price - stop_loss)
 
@@ -74,42 +67,31 @@ def calculate_trade(
     """
     Рассчитывает параметры сделки: SL, TP, размер позиции, R/R.
 
-    direction: "LONG" или "SHORT"
-    entry_price: цена входа (текущая цена)
-    support: уровень поддержки (для LONG — стоп ниже этого уровня)
-    resistance: уровень сопротивления (для SHORT — стоп выше этого уровня)
-    deposit: депозит пользователя в USDT
-    risk_percent: % риска на сделку (например 1 = 1%)
-    min_rr: минимальное допустимое соотношение risk/reward
-    leverage: плечо для расчёта размера позиции
-
-    Возвращает словарь с параметрами сделки, или None если R/R хуже min_rr.
+    Защиты:
+    - R/R обрезается сверху до MAX_RR (TP не дальше разумного)
+    - маржа не больше MAX_MARGIN_FRACTION депозита (иначе уменьшаем позицию)
     """
-    # Небольшой запас (буфер) за уровень, чтобы стоп не выбивался "по фитилю"
-    buffer_pct = 0.002  # 0.2%
+    buffer_pct = 0.002  # 0.2% буфер за уровень
 
     if direction == "LONG":
         stop_loss = support * (1 - buffer_pct)
         risk_distance = entry_price - stop_loss
 
         if risk_distance <= 0:
-            return None  # уровень поддержки выше цены входа — некорректная ситуация
+            return None
 
-        # TP1 = ближайшее сопротивление, TP2 = дальше с тем же шагом
         take_profit_1 = resistance
         reward_distance_1 = take_profit_1 - entry_price
-        take_profit_2 = entry_price + reward_distance_1 * 1.7
 
     elif direction == "SHORT":
         stop_loss = resistance * (1 + buffer_pct)
         risk_distance = stop_loss - entry_price
 
         if risk_distance <= 0:
-            return None  # уровень сопротивления ниже цены входа — некорректная ситуация
+            return None
 
         take_profit_1 = support
         reward_distance_1 = entry_price - take_profit_1
-        take_profit_2 = entry_price - reward_distance_1 * 1.7
 
     else:
         raise ValueError("direction должен быть 'LONG' или 'SHORT'")
@@ -117,32 +99,57 @@ def calculate_trade(
     if reward_distance_1 <= 0:
         return None  # нет пространства для движения в нужную сторону
 
-    # R/R считаем по TP1 (более консервативная оценка)
+    # R/R считаем по TP1
     risk_reward = reward_distance_1 / risk_distance
 
     if risk_reward < min_rr:
-        return None  # сигнал отбрасывается, R/R недостаточен
+        return None  # R/R недостаточен
 
-    # --- Расчёт размера позиции ---
+    # --- Обрезаем R/R сверху до MAX_RR ---
+    # Если TP оказался слишком далеко (нереалистичный R/R), переносим TP1
+    # на расстояние ровно MAX_RR от входа. Это даёт достижимую цель.
+    if risk_reward > MAX_RR:
+        reward_distance_1 = risk_distance * MAX_RR
+        if direction == "LONG":
+            take_profit_1 = entry_price + reward_distance_1
+        else:
+            take_profit_1 = entry_price - reward_distance_1
+        risk_reward = MAX_RR
+
+    # TP2 = дальше TP1 с тем же шагом
+    if direction == "LONG":
+        take_profit_2 = entry_price + reward_distance_1 * 1.7
+    else:
+        take_profit_2 = entry_price - reward_distance_1 * 1.7
+
+    # --- Расчёт размера позиции по риску ---
     risk_amount_usd = deposit * (risk_percent / 100)  # сколько $ готовы потерять
-
-    # Размер позиции (в монете) = риск в $ / расстояние до стопа (в $)
     position_size_coin = risk_amount_usd / risk_distance
-
-    # Номинальный объём позиции в USDT
     position_size_usd = position_size_coin * entry_price
 
     # --- Подбор безопасного плеча ---
-    # Если запрошенное плечо даёт ликвидацию ближе к цене, чем стоп-лосс
-    # (с запасом safety_margin) — снижаем плечо до безопасного значения.
     safe_leverage = find_safe_leverage(direction, entry_price, stop_loss, max_leverage=leverage)
     leverage_reduced = safe_leverage < leverage
     used_leverage = safe_leverage
 
-    liquidation_price = calculate_liquidation_price(direction, entry_price, used_leverage)
-
-    # Маржа, которую нужно выделить с учётом (возможно скорректированного) плеча
+    # Маржа при текущем размере позиции
     margin_required = position_size_usd / used_leverage
+
+    # --- Защита от слишком большой маржи ---
+    # Если маржа превышает MAX_MARGIN_FRACTION депозита — уменьшаем размер
+    # позиции так, чтобы маржа уложилась в лимит. Риск при этом станет
+    # МЕНЬШЕ заданного (это безопаснее, не опаснее).
+    max_margin = deposit * MAX_MARGIN_FRACTION
+    margin_capped = False
+    if margin_required > max_margin:
+        scale = max_margin / margin_required
+        position_size_usd *= scale
+        position_size_coin *= scale
+        risk_amount_usd *= scale  # реальный риск в $ тоже уменьшился
+        margin_required = max_margin
+        margin_capped = True
+
+    liquidation_price = calculate_liquidation_price(direction, entry_price, used_leverage)
 
     return {
         "direction": direction,
@@ -155,6 +162,7 @@ def calculate_trade(
         "position_size_coin": position_size_coin,
         "position_size_usd": position_size_usd,
         "margin_required": margin_required,
+        "margin_capped": margin_capped,
         "leverage": used_leverage,
         "requested_leverage": leverage,
         "leverage_reduced": leverage_reduced,
