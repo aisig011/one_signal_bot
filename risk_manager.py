@@ -7,12 +7,15 @@ risk_manager.py
 import pandas as pd
 
 # Максимальная доля депозита, которую можно выделить под маржу одной сделки.
-# Защищает от ситуации, когда близкий стоп раздувает позицию до всего депозита.
 MAX_MARGIN_FRACTION = 0.40  # 40% депозита
 
 # Максимальный R/R — если TP оказывается дальше, обрезаем его до этого уровня.
-# 1:16 нереалистично: цена редко проходит весь диапазон без отката.
 MAX_RR = 6.0
+
+# Минимальное расстояние стоп-лосса от цены входа (в %).
+# Защищает от микро-стопов (0.3–0.5%), которые выбивает рыночным шумом.
+# Если расчётный стоп ближе — отодвигаем его до этого минимума.
+MIN_SL_PERCENT = 1.0  # 1%
 
 
 def find_support_resistance(df: pd.DataFrame, lookback: int = 30) -> dict:
@@ -68,6 +71,7 @@ def calculate_trade(
     Рассчитывает параметры сделки: SL, TP, размер позиции, R/R.
 
     Защиты:
+    - SL не ближе MIN_SL_PERCENT от входа (защита от микро-стопов и шума)
     - R/R обрезается сверху до MAX_RR (TP не дальше разумного)
     - маржа не больше MAX_MARGIN_FRACTION депозита (иначе уменьшаем позицию)
     """
@@ -80,6 +84,14 @@ def calculate_trade(
         if risk_distance <= 0:
             return None
 
+        # --- Минимальное расстояние SL ---
+        # Если стоп ближе MIN_SL_PERCENT от входа — отодвигаем его дальше.
+        # Микро-стоп (0.3–0.5%) выбивается шумом, это убивало сделки.
+        min_sl_distance = entry_price * (MIN_SL_PERCENT / 100)
+        if risk_distance < min_sl_distance:
+            stop_loss = entry_price - min_sl_distance
+            risk_distance = min_sl_distance
+
         take_profit_1 = resistance
         reward_distance_1 = take_profit_1 - entry_price
 
@@ -90,6 +102,12 @@ def calculate_trade(
         if risk_distance <= 0:
             return None
 
+        # --- Минимальное расстояние SL ---
+        min_sl_distance = entry_price * (MIN_SL_PERCENT / 100)
+        if risk_distance < min_sl_distance:
+            stop_loss = entry_price + min_sl_distance
+            risk_distance = min_sl_distance
+
         take_profit_1 = support
         reward_distance_1 = entry_price - take_profit_1
 
@@ -99,15 +117,13 @@ def calculate_trade(
     if reward_distance_1 <= 0:
         return None  # нет пространства для движения в нужную сторону
 
-    # R/R считаем по TP1
+    # R/R считаем по TP1 (с учётом возможно отодвинутого стопа)
     risk_reward = reward_distance_1 / risk_distance
 
     if risk_reward < min_rr:
-        return None  # R/R недостаточен
+        return None  # R/R недостаточен (в т.ч. если стоп отодвинули и R/R упал)
 
     # --- Обрезаем R/R сверху до MAX_RR ---
-    # Если TP оказался слишком далеко (нереалистичный R/R), переносим TP1
-    # на расстояние ровно MAX_RR от входа. Это даёт достижимую цель.
     if risk_reward > MAX_RR:
         reward_distance_1 = risk_distance * MAX_RR
         if direction == "LONG":
@@ -123,7 +139,7 @@ def calculate_trade(
         take_profit_2 = entry_price - reward_distance_1 * 1.7
 
     # --- Расчёт размера позиции по риску ---
-    risk_amount_usd = deposit * (risk_percent / 100)  # сколько $ готовы потерять
+    risk_amount_usd = deposit * (risk_percent / 100)
     position_size_coin = risk_amount_usd / risk_distance
     position_size_usd = position_size_coin * entry_price
 
@@ -132,20 +148,16 @@ def calculate_trade(
     leverage_reduced = safe_leverage < leverage
     used_leverage = safe_leverage
 
-    # Маржа при текущем размере позиции
     margin_required = position_size_usd / used_leverage
 
     # --- Защита от слишком большой маржи ---
-    # Если маржа превышает MAX_MARGIN_FRACTION депозита — уменьшаем размер
-    # позиции так, чтобы маржа уложилась в лимит. Риск при этом станет
-    # МЕНЬШЕ заданного (это безопаснее, не опаснее).
     max_margin = deposit * MAX_MARGIN_FRACTION
     margin_capped = False
     if margin_required > max_margin:
         scale = max_margin / margin_required
         position_size_usd *= scale
         position_size_coin *= scale
-        risk_amount_usd *= scale  # реальный риск в $ тоже уменьшился
+        risk_amount_usd *= scale
         margin_required = max_margin
         margin_capped = True
 
