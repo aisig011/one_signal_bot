@@ -154,6 +154,52 @@ def remove_active_trade(trade_id):
     conn.close()
 
 
+def get_active_trades_for_user(user_id: int):
+    """Активные (отслеживаемые) сделки конкретного пользователя — для /debug."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT coin, direction, entry_price, stop_loss, take_profit_1, opened_at
+        FROM active_trades
+        WHERE user_id = %s
+        ORDER BY opened_at DESC
+    """, (user_id,))
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return [
+        {
+            "coin": r[0], "direction": r[1], "entry_price": r[2],
+            "stop_loss": r[3], "take_profit_1": r[4], "opened_at": r[5],
+        }
+        for r in rows
+    ]
+
+
+def get_active_cooldowns(user_id: int):
+    """
+    Монеты в кулдауне (сигнал был за последние 4 часа) — для /debug.
+    Возвращает список с монетой, направлением и сколько минут осталось.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT coin, direction,
+               EXTRACT(EPOCH FROM (sent_at + INTERVAL '4 hours' - NOW())) / 60 AS minutes_left
+        FROM sent_signals
+        WHERE user_id = %s
+        AND sent_at > NOW() - INTERVAL '4 hours'
+        ORDER BY sent_at DESC
+    """, (user_id,))
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return [
+        {"coin": r[0], "direction": r[1], "minutes_left": int(r[2]) if r[2] else 0}
+        for r in rows
+    ]
+
+
 def get_all_configured_users():
     conn = get_connection()
     cursor = conn.cursor()
