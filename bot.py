@@ -643,6 +643,56 @@ async def entered_trade_button(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ============================================================
+#  /debug — показать состояние бота понятным языком
+# ============================================================
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    user = storage.get_user(user_id)
+
+    if not user or not user["deposit"]:
+        await update.message.reply_text("Ты ещё не настроен. Напиши /start чтобы начать.")
+        return
+
+    lines = ["🔧 *Состояние бота*\n"]
+
+    # --- Активные сделки (вошёл) ---
+    active = storage.get_active_trades_for_user(user_id)
+    if active:
+        lines.append(f"📊 *Активные сделки ({len(active)}):*")
+        for t in active:
+            emoji = "🟢" if t["direction"] == "LONG" else "🔴"
+            lines.append(
+                f"  {emoji} {t['coin']} {t['direction']} — вход {t['entry_price']:.4f}, "
+                f"TP {t['take_profit_1']:.4f}, SL {t['stop_loss']:.4f}"
+            )
+        lines.append("  _По этим монетам новые сигналы не приходят, пока сделка открыта._")
+    else:
+        lines.append("📊 *Активные сделки:* нет")
+
+    lines.append("")
+
+    # --- Кулдауны (монеты, по которым недавно был сигнал) ---
+    cooldowns = storage.get_active_cooldowns(user_id)
+    if cooldowns:
+        lines.append(f"⏳ *Монеты в кулдауне ({len(cooldowns)}):*")
+        for c in cooldowns:
+            h = c["minutes_left"] // 60
+            m = c["minutes_left"] % 60
+            time_str = f"{h}ч {m}мин" if h > 0 else f"{m}мин"
+            lines.append(f"  • {c['coin']} ({c['direction']}) — ещё {time_str}")
+        lines.append("  _По этим монетам сигнал не повторится, пока идёт кулдаун._")
+    else:
+        lines.append("⏳ *Кулдауны:* нет — все монеты свободны для сигналов")
+
+    lines.append("")
+    lines.append(f"💼 Депозит: {user['deposit']} USDT | Риск: {user['risk_percent']}%")
+    lines.append(f"📋 Монет отслеживается: {len(user['coins'])}")
+    lines.append("\n_Бот сканирует рынок каждые 30 минут._")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ============================================================
 #  Глобальный обработчик ошибок — чтобы ошибки в job_queue
 #  (фоновом сканировании) не "проглатывались" молча
 # ============================================================
@@ -721,6 +771,7 @@ def main():
     app.add_handler(CommandHandler("settings", settings))
     app.add_handler(CommandHandler("check", check_command))
     app.add_handler(CommandHandler("signal", signal_command))
+    app.add_handler(CommandHandler("debug", debug_command))
 
     # Кнопка "Вошёл в сделку" под сигналом
     app.add_handler(CallbackQueryHandler(entered_trade_button, pattern="^entered_"))
