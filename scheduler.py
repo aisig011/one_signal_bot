@@ -37,11 +37,6 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info("scan_market: нет настроенных пользователей, завершаю")
         return
 
-    # Собираем уникальный набор монет, чтобы не запрашивать одно и то же
-    # с Binance несколько раз для разных пользователей с похожими списками.
-    # (Для простоты MVP считаем сигнал отдельно на каждого юзера+монету —
-    # запросов всё равно немного: до ~5 монет x число пользователей)
-
     for user in users:
         logger.info(f"scan_market: пользователь {user['user_id']}, монеты: {user['coins']}")
 
@@ -78,7 +73,7 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.info(f"scan_market: {coin} — уже есть активная сделка, пропускаю")
                 continue
 
-            # Проверяем, не отправляли ли уже похожий сигнал недавно
+            # Кулдаун: не отправляли ли уже похожий сигнал за последние 4 часа
             if storage.was_signal_sent_recently(user["user_id"], coin, direction, entry_price):
                 logger.info(f"scan_market: {coin} {direction} — уже отправлялся недавно, пропускаю")
                 continue
@@ -86,7 +81,6 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
             text = format_signal_message(result, user)
 
             try:
-                # Сохраняем сигнал и создаём кнопку "Вошёл" с его id
                 signal_id = storage.save_pending_signal(
                     user["user_id"], coin, result["symbol"], direction,
                     float(entry_price), float(trade["stop_loss"]), float(trade["take_profit_1"]),
@@ -101,7 +95,6 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                     parse_mode="Markdown",
                     reply_markup=keyboard,
                 )
-                # Сохраняем message_id чтобы TP/SL могли сделать reply
                 storage.update_pending_signal_message_id(signal_id, sent_msg.message_id)
                 storage.mark_signal_sent(user["user_id"], coin, direction, entry_price)
                 logger.info(f"scan_market: сигнал {coin} {direction} отправлен пользователю {user['user_id']}")
@@ -113,8 +106,8 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def check_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Проверяет активные сделки (которые пользователь подтвердил кнопкой
-    'Вошёл') — достигла ли цена TP или SL, и присылает уведомление.
+    Проверяет активные сделки (подтверждённые кнопкой 'Вошёл') —
+    достигла ли цена TP или SL, и присылает уведомление (reply на сигнал).
     """
     try:
         trades = storage.get_all_active_trades()
@@ -125,7 +118,6 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not trades:
         return
 
-    # Кэш цен, чтобы не запрашивать одну монету несколько раз
     price_cache = {}
 
     for t in trades:
@@ -156,7 +148,6 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not (hit_tp or hit_sl):
             continue
 
-        # Считаем результат в процентах от цены входа
         if hit_tp:
             pct = abs(t["take_profit_1"] - t["entry_price"]) / t["entry_price"] * 100
             msg = (
@@ -189,7 +180,12 @@ def format_signal_message(result: dict, user: dict) -> str:
     """Форматирует сигнал в текст сообщения (используется и в /signal, и в scheduler)."""
     trade = result["trade"]
     direction_emoji = "🟢 LONG" if trade["direction"] == "LONG" else "🔴 SHORT"
-    is_range = result.get("market_phase") == "RANGE"
+
+    # RANGE-формат показываем только если реально есть данные диапазона.
+    # Защита от рассинхрона: фаза могла прийти из кэша как RANGE, а сигнал
+    # отработал по трендовой логике (range_info отсутствует) — тогда покажем
+    # трендовый формат, а не "Диапазон: 0.0000".
+    is_range = result.get("market_phase") == "RANGE" and bool(result.get("range_info"))
 
     leverage_note = ""
     if trade["leverage_reduced"]:
@@ -217,8 +213,6 @@ def format_signal_message(result: dict, user: dict) -> str:
     phase_str = phase_names.get(result.get("market_phase", ""), result.get("market_phase", ""))
     phase_line = f"🌐 Фаза рынка: {phase_str}\n"
 
-    # Строка с контекстом тренда — для RANGE показываем границы диапазона,
-    # для тренда — тренды 1h/4h как раньше
     if is_range:
         ri = result.get("range_info", {})
         context_lines = (
