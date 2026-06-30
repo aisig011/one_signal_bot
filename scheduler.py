@@ -19,10 +19,7 @@ SCAN_INTERVAL_SECONDS = 30 * 60  # 30 минут
 
 
 async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Запускается планировщиком каждые SCAN_INTERVAL_SECONDS.
-    Проходит по всем пользователям и их монетам, ищет сигналы.
-    """
+    """Скан рынка по всем пользователям и их монетам каждые 30 минут."""
     logger.info("scan_market: запуск сканирования")
 
     try:
@@ -55,7 +52,7 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                     min_rr=2.0,
                 )
             except Exception as e:
-                logger.warning(f"scan_market: ошибка анализа {coin} для пользователя {user['user_id']}: {e}", exc_info=True)
+                logger.warning(f"scan_market: ошибка анализа {coin} для {user['user_id']}: {e}", exc_info=True)
                 continue
 
             if result is None:
@@ -68,14 +65,14 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             logger.info(f"scan_market: {coin} — НАЙДЕН сигнал {direction} @ {entry_price}")
 
-            # Защита: уже есть активная сделка по этой монете — не дублируем
+            # Защита: уже есть активная сделка по этой монете
             if storage.has_active_trade(user["user_id"], coin):
                 logger.info(f"scan_market: {coin} — уже есть активная сделка, пропускаю")
                 continue
 
-            # Кулдаун: не отправляли ли уже похожий сигнал за последние 4 часа
+            # Кулдаун по монете (4 часа, любое направление)
             if storage.was_signal_sent_recently(user["user_id"], coin, direction, entry_price):
-                logger.info(f"scan_market: {coin} {direction} — уже отправлялся недавно, пропускаю")
+                logger.info(f"scan_market: {coin} — уже отправлялся недавно, пропускаю")
                 continue
 
             text = format_signal_message(result, user)
@@ -99,15 +96,15 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                 storage.mark_signal_sent(user["user_id"], coin, direction, entry_price)
                 logger.info(f"scan_market: сигнал {coin} {direction} отправлен пользователю {user['user_id']}")
             except Exception as e:
-                logger.warning(f"scan_market: не удалось отправить сообщение пользователю {user['user_id']}: {e}", exc_info=True)
+                logger.warning(f"scan_market: не удалось отправить сообщение {user['user_id']}: {e}", exc_info=True)
 
     logger.info("scan_market: сканирование завершено")
 
 
 async def check_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Проверяет активные сделки (подтверждённые кнопкой 'Вошёл') —
-    достигла ли цена TP или SL, и присылает уведомление (reply на сигнал).
+    Проверяет активные сделки — достигла ли цена TP или SL.
+    Уведомление приходит как reply на оригинальный сигнал (если возможно).
     """
     try:
         trades = storage.get_all_active_trades()
@@ -163,17 +160,37 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"Это часть торговли — следующая сделка может быть прибыльной. 🔴"
             )
 
-        try:
-            await context.bot.send_message(
-                chat_id=t["user_id"],
-                text=msg,
-                parse_mode="Markdown",
-                reply_to_message_id=t.get("signal_message_id"),
-            )
+        msg_id = t.get("signal_message_id")
+        sent_ok = False
+
+        # Пробуем отправить как reply на оригинальный сигнал
+        if msg_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=t["user_id"],
+                    text=msg,
+                    parse_mode="Markdown",
+                    reply_to_message_id=msg_id,
+                )
+                sent_ok = True
+            except Exception as e:
+                # Reply не удался (сигнал удалён/слишком старый) — шлём без reply
+                logger.warning(f"check_active_trades: reply не удался ({e}), шлю без reply")
+
+        if not sent_ok:
+            try:
+                await context.bot.send_message(
+                    chat_id=t["user_id"],
+                    text=msg,
+                    parse_mode="Markdown",
+                )
+                sent_ok = True
+            except Exception as e:
+                logger.warning(f"check_active_trades: ошибка отправки: {e}")
+
+        if sent_ok:
             storage.remove_active_trade(t["id"])
             logger.info(f"check_active_trades: {t['coin']} {direction} — {'TP' if hit_tp else 'SL'}, уведомление отправлено")
-        except Exception as e:
-            logger.warning(f"check_active_trades: ошибка отправки: {e}")
 
 
 def format_signal_message(result: dict, user: dict) -> str:
@@ -182,9 +199,7 @@ def format_signal_message(result: dict, user: dict) -> str:
     direction_emoji = "🟢 LONG" if trade["direction"] == "LONG" else "🔴 SHORT"
 
     # RANGE-формат показываем только если реально есть данные диапазона.
-    # Защита от рассинхрона: фаза могла прийти из кэша как RANGE, а сигнал
-    # отработал по трендовой логике (range_info отсутствует) — тогда покажем
-    # трендовый формат, а не "Диапазон: 0.0000".
+    # Защита от рассинхрона фазы (кэш RANGE) и трендового входа (нет range_info).
     is_range = result.get("market_phase") == "RANGE" and bool(result.get("range_info"))
 
     leverage_note = ""
