@@ -37,8 +37,6 @@ def init_db():
             PRIMARY KEY (user_id, coin, direction)
         )
     """)
-    # Отправленные сигналы — чтобы кнопка "Вошёл" могла по короткому id
-    # достать все параметры сделки (callback_data ограничен 64 байтами).
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS pending_signals (
             id SERIAL PRIMARY KEY,
@@ -49,11 +47,10 @@ def init_db():
             entry_price REAL,
             stop_loss REAL,
             take_profit_1 REAL,
+            message_id BIGINT DEFAULT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Активные сделки, которые пользователь подтвердил кнопкой "Вошёл".
-    # Бот отслеживает их и присылает уведомление при достижении TP или SL.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS active_trades (
             id SERIAL PRIMARY KEY,
@@ -64,8 +61,18 @@ def init_db():
             entry_price REAL,
             stop_loss REAL,
             take_profit_1 REAL,
+            signal_message_id BIGINT DEFAULT NULL,
             opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+    """)
+    # Миграции для существующих таблиц (добавляют колонки если их нет)
+    cursor.execute("""
+        ALTER TABLE active_trades
+        ADD COLUMN IF NOT EXISTS signal_message_id BIGINT DEFAULT NULL
+    """)
+    cursor.execute("""
+        ALTER TABLE pending_signals
+        ADD COLUMN IF NOT EXISTS message_id BIGINT DEFAULT NULL
     """)
     conn.commit()
     cursor.close()
@@ -81,7 +88,7 @@ def save_pending_signal(user_id, coin, symbol, direction, entry_price, stop_loss
         (user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING id
-    """, (user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1))
+    """, (user_id, coin, symbol, direction, float(entry_price), float(stop_loss), float(take_profit_1)))
     new_id = cursor.fetchone()[0]
     conn.commit()
     cursor.close()
@@ -94,7 +101,7 @@ def get_pending_signal(signal_id: int):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT id, user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1
+        SELECT id, user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1, message_id
         FROM pending_signals WHERE id = %s
     """, (signal_id,))
     r = cursor.fetchone()
@@ -105,19 +112,31 @@ def get_pending_signal(signal_id: int):
     return {
         "id": r[0], "user_id": r[1], "coin": r[2], "symbol": r[3],
         "direction": r[4], "entry_price": r[5], "stop_loss": r[6],
-        "take_profit_1": r[7],
+        "take_profit_1": r[7], "message_id": r[8],
     }
 
 
-def add_active_trade(user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1):
+def update_pending_signal_message_id(signal_id: int, message_id: int):
+    """Сохраняет message_id отправленного сигнала для последующего reply."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE pending_signals SET message_id = %s WHERE id = %s
+    """, (message_id, signal_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def add_active_trade(user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1, signal_message_id=None):
     """Сохраняет сделку для отслеживания после нажатия кнопки 'Вошёл'."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO active_trades
-        (user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-    """, (user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1))
+        (user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1, signal_message_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """, (user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1, signal_message_id))
     conn.commit()
     cursor.close()
     conn.close()
@@ -128,7 +147,7 @@ def get_all_active_trades():
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT id, user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1
+        SELECT id, user_id, coin, symbol, direction, entry_price, stop_loss, take_profit_1, signal_message_id
         FROM active_trades
     """)
     rows = cursor.fetchall()
@@ -138,10 +157,25 @@ def get_all_active_trades():
         {
             "id": r[0], "user_id": r[1], "coin": r[2], "symbol": r[3],
             "direction": r[4], "entry_price": r[5], "stop_loss": r[6],
-            "take_profit_1": r[7],
+            "take_profit_1": r[7], "signal_message_id": r[8],
         }
         for r in rows
     ]
+
+
+def has_active_trade(user_id: int, coin: str) -> bool:
+    """Проверяет, есть ли уже активная (отслеживаемая) сделка по монете."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT 1 FROM active_trades
+        WHERE user_id = %s AND coin = %s
+        LIMIT 1
+    """, (user_id, coin))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return row is not None
 
 
 def remove_active_trade(trade_id):
@@ -177,10 +211,7 @@ def get_active_trades_for_user(user_id: int):
 
 
 def get_active_cooldowns(user_id: int):
-    """
-    Монеты в кулдауне (сигнал был за последние 4 часа) — для /debug.
-    Возвращает список с монетой, направлением и сколько минут осталось.
-    """
+    """Монеты в кулдауне (сигнал был за последние 4 часа) — для /debug."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -224,9 +255,8 @@ def get_all_configured_users():
 def was_signal_sent_recently(user_id: int, coin: str, direction: str = None, entry_price: float = 0, threshold_pct: float = 0.5) -> bool:
     """
     Проверяет, отправлялся ли сигнал по монете за последние 4 часа.
-    Направление (direction) НЕ учитывается намеренно: если по SOL уже был
-    сигнал (LONG или SHORT) — не дублируем по этой монете, пока не пройдёт
-    окно. Это убирает повторные сигналы по одной монете.
+    Направление НЕ учитывается: если по монете уже был сигнал (LONG или
+    SHORT) — не дублируем, пока не пройдёт окно.
     """
     conn = get_connection()
     cursor = conn.cursor()
