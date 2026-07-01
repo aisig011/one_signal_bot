@@ -71,7 +71,7 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
 
             # Кулдаун по монете (4 часа, любое направление)
-            if storage.was_signal_sent_recently(user["user_id"], coin, direction, entry_price):
+            if storage.was_signal_sent_recently(user["user_id"], coin):
                 logger.info(f"scan_market: {coin} — уже отправлялся недавно, пропускаю")
                 continue
 
@@ -92,8 +92,18 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                     parse_mode="Markdown",
                     reply_markup=keyboard,
                 )
-                storage.update_pending_signal_message_id(signal_id, sent_msg.message_id)
+
+                # ВАЖНО: кулдаун пишем СРАЗУ после отправки — приоритет №1,
+                # чтобы дубля не было даже если что-то ниже упадёт.
                 storage.mark_signal_sent(user["user_id"], coin, direction, entry_price)
+
+                # message_id для reply — в отдельном try, его падение
+                # не должно ломать кулдаун (был баг с дублями из-за этого).
+                try:
+                    storage.update_pending_signal_message_id(signal_id, sent_msg.message_id)
+                except Exception as e:
+                    logger.warning(f"scan_market: не удалось сохранить message_id: {e}")
+
                 logger.info(f"scan_market: сигнал {coin} {direction} отправлен пользователю {user['user_id']}")
             except Exception as e:
                 logger.warning(f"scan_market: не удалось отправить сообщение {user['user_id']}: {e}", exc_info=True)
@@ -163,7 +173,6 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
         msg_id = t.get("signal_message_id")
         sent_ok = False
 
-        # Пробуем отправить как reply на оригинальный сигнал
         if msg_id:
             try:
                 await context.bot.send_message(
@@ -174,7 +183,6 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 sent_ok = True
             except Exception as e:
-                # Reply не удался (сигнал удалён/слишком старый) — шлём без reply
                 logger.warning(f"check_active_trades: reply не удался ({e}), шлю без reply")
 
         if not sent_ok:
@@ -198,8 +206,6 @@ def format_signal_message(result: dict, user: dict) -> str:
     trade = result["trade"]
     direction_emoji = "🟢 LONG" if trade["direction"] == "LONG" else "🔴 SHORT"
 
-    # RANGE-формат показываем только если реально есть данные диапазона.
-    # Защита от рассинхрона фазы (кэш RANGE) и трендового входа (нет range_info).
     is_range = result.get("market_phase") == "RANGE" and bool(result.get("range_info"))
 
     leverage_note = ""
