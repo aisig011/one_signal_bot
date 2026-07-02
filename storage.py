@@ -274,12 +274,14 @@ def was_signal_sent_recently(user_id: int, coin: str, direction: str = None, ent
 def mark_signal_sent(user_id: int, coin: str, direction: str, entry_price: float):
     conn = get_connection()
     cursor = conn.cursor()
+    # float() обязателен: entry_price может прийти как numpy.float64,
+    # который psycopg2 не понимает (ошибка schema "np" does not exist).
     cursor.execute("""
         INSERT INTO sent_signals (user_id, coin, direction, entry_price, sent_at)
         VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
         ON CONFLICT (user_id, coin, direction) DO UPDATE SET
             entry_price = EXCLUDED.entry_price, sent_at = CURRENT_TIMESTAMP
-    """, (user_id, coin, direction, entry_price))
+    """, (int(user_id), str(coin), str(direction), float(entry_price)))
     conn.commit()
     cursor.close()
     conn.close()
