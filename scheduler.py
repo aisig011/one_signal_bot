@@ -61,7 +61,7 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             trade = result["trade"]
             direction = trade["direction"]
-            entry_price = trade["entry_price"]
+            entry_price = float(trade["entry_price"])
 
             logger.info(f"scan_market: {coin} — НАЙДЕН сигнал {direction} @ {entry_price}")
 
