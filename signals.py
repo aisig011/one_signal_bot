@@ -151,14 +151,20 @@ def find_range_signal(coin: str, symbol: str, df_1h: pd.DataFrame,
 
 def _get_btc_bias() -> str | None:
     """
-    Определяет "настроение" рынка по тренду BTC (BTC тянет за собой альты).
+    Определяет "смещение" рынка по BTC (BTC тянет за собой альты).
+
+    Использует НЕ market_phase (её порог 1.5% слишком строгий — реальный
+    рост BTC часто идёт медленнее, ~1%, и market_phase считает это боковиком).
+    Здесь более чувствительная оценка по нескольким признакам сразу:
+    наклон EMA20, положение цены относительно EMA50, тренд по EMA50, RSI.
 
     Возвращает:
-    - "UP"   → BTC в восходящем тренде (не стоит шортить альты против роста)
-    - "DOWN" → BTC в нисходящем тренде (не стоит лонговать альты против падения)
-    - None   → BTC в боковике/хаосе или ошибка — фильтр не применяем
+    - "UP"   → рынок склонен вверх (не шортим альты против роста)
+    - "DOWN" → рынок склонен вниз (не лонгуем альты против падения)
+    - None   → BTC реально в боковике — фильтр не применяем
 
-    Использует ту же market_phase (с кэшем 4ч), так что лишних запросов почти нет.
+    Логика: считаем "очки" за бычьи и медвежьи признаки. Нужно набрать
+    хотя бы 2 признака в одну сторону, иначе считаем боковиком (None).
     """
     import logging
     logger = logging.getLogger("signals")
@@ -166,12 +172,56 @@ def _get_btc_bias() -> str | None:
         btc_symbol = market.get_symbol("BTC")
         df_btc = market.get_klines(btc_symbol, "1h", limit=250)
         df_btc = indicators.add_indicators(df_btc)
-        phase = market_phase.detect_phase("BTC", df_btc)["phase"]
-        if phase == "TREND_UP":
+
+        last = df_btc.iloc[-1]
+        price = last["close"]
+        ema20 = last["ema_20"]
+        ema50 = last["ema_50"]
+        rsi = last["rsi"]
+
+        # Наклон EMA20 за 10 свечей
+        ema20_prev = df_btc.iloc[-10]["ema_20"] if len(df_btc) >= 10 else ema20
+        ema20_slope = (ema20 - ema20_prev) / ema20_prev * 100 if ema20_prev > 0 else 0
+
+        bull_score = 0
+        bear_score = 0
+
+        # Признак 1: наклон EMA20 (более мягкий порог 0.5%, не 1.5%)
+        if ema20_slope > 0.5:
+            bull_score += 1
+        elif ema20_slope < -0.5:
+            bear_score += 1
+
+        # Признак 2: цена относительно EMA50
+        if price > ema50:
+            bull_score += 1
+        elif price < ema50:
+            bear_score += 1
+
+        # Признак 3: EMA20 относительно EMA50 (структура тренда)
+        if ema20 > ema50:
+            bull_score += 1
+        elif ema20 < ema50:
+            bear_score += 1
+
+        # Признак 4: RSI (импульс)
+        if rsi > 55:
+            bull_score += 1
+        elif rsi < 45:
+            bear_score += 1
+
+        logger.info(
+            f"_get_btc_bias: ema20_slope={ema20_slope:.2f}%, RSI={rsi:.1f}, "
+            f"price{'>' if price > ema50 else '<'}EMA50 → bull={bull_score}, bear={bear_score}"
+        )
+
+        # Нужно минимум 2 признака перевеса в одну сторону
+        if bull_score >= 2 and bull_score > bear_score:
             return "UP"
-        if phase == "TREND_DOWN":
+        if bear_score >= 2 and bear_score > bull_score:
             return "DOWN"
-        return None  # RANGE или CHAOS — не вмешиваемся
+        return None  # нет чёткого перевеса — боковик, не вмешиваемся
+
     except Exception as e:
         logger.warning(f"_get_btc_bias: ошибка определения тренда BTC: {e}")
         return None  # при ошибке фильтр не блокирует торговлю
