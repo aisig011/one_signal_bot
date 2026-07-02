@@ -248,8 +248,15 @@ def format_signal_message(result: dict, user: dict) -> str:
             f"📊 Тренд 4h: {trend_4h_str}\n"
         )
 
+    # Строка с баллом качества сигнала (если посчитан)
+    quality = result.get("quality")
+    quality_line = ""
+    if quality:
+        quality_line = f"⭐ Качество: {quality['label']} ({quality['score']}/{quality['max']})\n"
+
     return (
         f"🚀 *НОВЫЙ СИГНАЛ: {result['coin']}/USDT {direction_emoji}*\n\n"
+        f"{quality_line}"
         f"{context_lines}"
         f"📈 RSI 1h: {result['rsi_1h']:.1f}\n"
         f"📍 Причина входа: {result['entry_reason']}\n"
