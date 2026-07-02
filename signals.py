@@ -149,7 +149,35 @@ def find_range_signal(coin: str, symbol: str, df_1h: pd.DataFrame,
     }
 
 
-def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 2.0) -> dict | None:
+def _get_btc_bias() -> str | None:
+    """
+    Определяет "настроение" рынка по тренду BTC (BTC тянет за собой альты).
+
+    Возвращает:
+    - "UP"   → BTC в восходящем тренде (не стоит шортить альты против роста)
+    - "DOWN" → BTC в нисходящем тренде (не стоит лонговать альты против падения)
+    - None   → BTC в боковике/хаосе или ошибка — фильтр не применяем
+
+    Использует ту же market_phase (с кэшем 4ч), так что лишних запросов почти нет.
+    """
+    import logging
+    logger = logging.getLogger("signals")
+    try:
+        btc_symbol = market.get_symbol("BTC")
+        df_btc = market.get_klines(btc_symbol, "1h", limit=250)
+        df_btc = indicators.add_indicators(df_btc)
+        phase = market_phase.detect_phase("BTC", df_btc)["phase"]
+        if phase == "TREND_UP":
+            return "UP"
+        if phase == "TREND_DOWN":
+            return "DOWN"
+        return None  # RANGE или CHAOS — не вмешиваемся
+    except Exception as e:
+        logger.warning(f"_get_btc_bias: ошибка определения тренда BTC: {e}")
+        return None  # при ошибке фильтр не блокирует торговлю
+
+
+def _find_signal_raw(coin: str, deposit: float, risk_percent: float, min_rr: float = 2.0) -> dict | None:
     """
     Ищет торговый сигнал по монете.
 
@@ -286,3 +314,42 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
         "volume_ratio": (last["volume"] / last["volume_avg"]) if ("volume_avg" in df_1h.columns and not pd.isna(last.get("volume_avg")) and last["volume_avg"] > 0) else None,
         "trade": trade,
     }
+
+
+
+def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 2.0) -> dict | None:
+    """
+    Обёртка над _find_signal_raw с фильтром по тренду BTC.
+
+    BTC тянет за собой весь альткоин-рынок. Торговать против сильного
+    движения BTC — частая причина стопов (шорт при растущем рынке,
+    лонг при падающем). Поэтому:
+    - BTC растёт → не отдаём SHORT по альтам
+    - BTC падает → не отдаём LONG по альтам
+    - BTC в боковике/хаосе → фильтр не применяется
+
+    Сам BTC не фильтруем (нельзя фильтровать BTC по BTC).
+    """
+    import logging
+    logger = logging.getLogger("signals")
+
+    result = _find_signal_raw(coin, deposit, risk_percent, min_rr=min_rr)
+    if result is None:
+        return None
+
+    # BTC не фильтруем сам по себе
+    if coin.upper() == "BTC":
+        return result
+
+    direction = result["trade"]["direction"]
+    btc_bias = _get_btc_bias()
+
+    if btc_bias == "UP" and direction == "SHORT":
+        logger.info(f"diag {coin}: SHORT отменён — BTC в восходящем тренде (не шортим против роста рынка)")
+        return None
+
+    if btc_bias == "DOWN" and direction == "LONG":
+        logger.info(f"diag {coin}: LONG отменён — BTC в нисходящем тренде (не лонгуем против падения рынка)")
+        return None
+
+    return result
