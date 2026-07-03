@@ -469,11 +469,9 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
     BTC тянет за собой весь альткоин-рынок. Торговать против сильного
     движения BTC — частая причина стопов (шорт при растущем рынке,
     лонг при падающем). Поэтому:
-    - BTC растёт → не отдаём SHORT по альтам
-    - BTC падает → не отдаём LONG по альтам
+    - BTC растёт → не отдаём SHORT (ни по альтам, ни по самому BTC)
+    - BTC падает → не отдаём LONG (ни по альтам, ни по самому BTC)
     - BTC в боковике/хаосе → фильтр не применяется
-
-    Сам BTC не фильтруем (нельзя фильтровать BTC по BTC).
     """
     import logging
     logger = logging.getLogger("signals")
@@ -482,13 +480,11 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
     if result is None:
         return None
 
-    # BTC не фильтруем сам по себе
-    if coin.upper() == "BTC":
-        return result
-
     direction = result["trade"]["direction"]
     btc_bias = _get_btc_bias()
 
+    # BTC тоже фильтруется по своему тренду: если BTC склонен вверх — не
+    # шортим его (шорт против собственного роста = стоп, как у альтов).
     if btc_bias == "UP" and direction == "SHORT":
         logger.info(f"diag {coin}: SHORT отменён — BTC в восходящем тренде (не шортим против роста рынка)")
         return None
