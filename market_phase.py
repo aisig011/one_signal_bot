@@ -3,9 +3,9 @@ market_phase.py
 Определение фазы рынка по индикаторам (без GPT — быстро, без зависаний).
 
 CHAOS:      ATR за 5 свечей > 5% цены (высокая волатильность)
-RANGE:      наклон EMA20 близок к нулю (< 1.5%) И диапазон < 12%
-TREND_UP:   наклон EMA20 положительный (>= 1.5%)
-TREND_DOWN: наклон EMA20 отрицательный (<= -1.5%)
+RANGE:      наклон EMA20 близок к нулю (< 0.8%) И диапазон < 12%
+TREND_UP:   наклон EMA20 положительный (>= 0.8%)
+TREND_DOWN: наклон EMA20 отрицательный (<= -0.8%)
 
 Раньше здесь был вызов GPT для проверки CHAOS, но он замедлял скан
 (запрос на каждую монету) и вызывал зависания. Индикаторный ATR-чек
@@ -48,14 +48,14 @@ def _calc_phase_by_indicators(df) -> dict:
     if atr_pct > 5.0:
         return {"phase": "CHAOS", "reason": f"высокая волатильность ATR {atr_pct:.1f}%"}
 
-    if abs(ema20_slope_pct) < 1.5 and range_width_pct < 12.0:
+    if abs(ema20_slope_pct) < 0.8 and range_width_pct < 12.0:
         return {"phase": "RANGE", "reason": f"EMA20 плоская ({ema20_slope_pct:.2f}%), диапазон {range_width_pct:.1f}%"}
 
-    if ema20_slope_pct >= 1.5:
+    if ema20_slope_pct >= 0.8:
         pos = "выше" if price > ema50_now else "ниже"
         return {"phase": "TREND_UP", "reason": f"EMA20 растёт ({ema20_slope_pct:.2f}%), цена {pos} EMA50"}
 
-    if ema20_slope_pct <= -1.5:
+    if ema20_slope_pct <= -0.8:
         pos = "выше" if price > ema50_now else "ниже"
         return {"phase": "TREND_DOWN", "reason": f"EMA20 падает ({ema20_slope_pct:.2f}%), цена {pos} EMA50"}
 
