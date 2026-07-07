@@ -149,6 +149,78 @@ def find_range_signal(coin: str, symbol: str, df_1h: pd.DataFrame,
     }
 
 
+def _is_choppy_market() -> bool:
+    """
+    Определяет "дёрганый" (хаотичный, безтрендовый) рынок по BTC.
+
+    Идея: если направление BTC за последние часы металось вверх-вниз —
+    рынок неясный, и торговать в нём опасно (сигналы против движения
+    ловят стопы). Как трейдер, который говорит "картина мутная, жду".
+
+    Смотрим наклон EMA20 на нескольких отрезках (свежий, средний, дальний).
+    Если знаки наклонов расходятся (был плюс, стал минус или наоборот) —
+    это виляние = choppy. Также choppy, если недавняя волатильность высокая
+    относительно чистого хода цены (цена много двигалась, но никуда не пришла).
+
+    Возвращает True если рынок дёрганый (не торгуем).
+    """
+    import logging
+    logger = logging.getLogger("signals")
+    try:
+        btc_symbol = market.get_symbol("BTC")
+        df = market.get_klines(btc_symbol, "1h", limit=250)
+        df = indicators.add_indicators(df)
+
+        # Наклоны EMA20 на трёх отрезках: последние 6ч, 6-12ч назад, 12-18ч назад
+        def slope(a_idx, b_idx):
+            a = df.iloc[a_idx]["ema_20"]
+            b = df.iloc[b_idx]["ema_20"]
+            return (a - b) / b * 100 if b > 0 else 0
+
+        s_recent = slope(-1, -6)    # последние 6 часов
+        s_mid = slope(-6, -12)      # 6-12 часов назад
+        s_far = slope(-12, -18)     # 12-18 часов назад
+
+        # Считаем сколько раз менялся знак наклона (виляние)
+        signs = []
+        for s in (s_far, s_mid, s_recent):
+            if s > 0.15:
+                signs.append(1)
+            elif s < -0.15:
+                signs.append(-1)
+            else:
+                signs.append(0)
+
+        # Смены направления: было +, стало -, или наоборот
+        flips = 0
+        prev = None
+        for sg in signs:
+            if sg != 0:
+                if prev is not None and sg != prev:
+                    flips += 1
+                prev = sg
+
+        # Чистый ход vs пройденный путь за 18 свечей (efficiency)
+        window = df.iloc[-18:]
+        net_move = abs(window.iloc[-1]["close"] - window.iloc[0]["close"])
+        path = window["high"].max() - window["low"].min()
+        efficiency = net_move / path if path > 0 else 0
+
+        # Choppy если: было виляние направления ИЛИ цена ходила много но
+        # никуда не пришла (efficiency < 0.35 = меньше трети хода в чистом остатке)
+        is_choppy = flips >= 1 or efficiency < 0.35
+
+        logger.info(
+            f"_is_choppy_market: slopes far={s_far:.2f} mid={s_mid:.2f} recent={s_recent:.2f}, "
+            f"flips={flips}, efficiency={efficiency:.2f} → choppy={is_choppy}"
+        )
+        return is_choppy
+
+    except Exception as e:
+        logger.warning(f"_is_choppy_market: ошибка ({e}), считаю рынок не-choppy")
+        return False  # при ошибке не блокируем (лучше пропустить чем зависнуть)
+
+
 def _get_btc_bias() -> str | None:
     """
     Определяет "смещение" рынка по BTC (BTC тянет за собой альты).
@@ -478,6 +550,13 @@ def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 
 
     result = _find_signal_raw(coin, deposit, risk_percent, min_rr=min_rr)
     if result is None:
+        return None
+
+    # Фильтр №1: дёрганый рынок — не торгуем вообще.
+    # Если BTC мечется вверх-вниз без чёткого направления, любые входы
+    # (и лонги, и шорты) ловят стопы. Лучше переждать, как трейдер.
+    if _is_choppy_market():
+        logger.info(f"diag {coin}: сигнал отменён — рынок дёрганый (choppy), пережидаем")
         return None
 
     direction = result["trade"]["direction"]
