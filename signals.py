@@ -359,38 +359,46 @@ def _find_signal_raw(coin: str, deposit: float, risk_percent: float, min_rr: flo
     direction = None
     entry_reason = None
 
+    # Зона пуллбэка расширена до 2.5% (было 1.2% — слишком тесно, редко срабатывало).
+    # Вход "по тренду на откате": цена откатилась к EMA20 и разворачивается
+    # обратно в сторону тренда — это надёжный вход ПО движению.
     ema20_distance_pct = abs(last["close"] - last["ema_20"]) / last["ema_20"] * 100
-    near_ema20 = ema20_distance_pct <= 1.2
+    near_ema20 = ema20_distance_pct <= 2.5
+
+    # Свеча разворачивается обратно в сторону тренда (текущая vs предыдущая цена)
+    price_turning_up = last["close"] > prev["close"]
+    price_turning_down = last["close"] < prev["close"]
 
     if trend_1h == "bullish":
-        rsi_recovering = prev["rsi"] < 35 and last["rsi"] > prev["rsi"]
+        rsi_recovering = prev["rsi"] < 40 and last["rsi"] > prev["rsi"]
         macd_cross_up = prev["macd_diff"] <= 0 and last["macd_diff"] > 0
-        pullback = near_ema20 and last["rsi"] < 65 and last["close"] >= last["ema_50"]
+        # Пуллбэк к EMA20 в аптренде + цена разворачивается вверх = вход по тренду
+        pullback = near_ema20 and last["rsi"] < 68 and price_turning_up
 
-        if rsi_recovering:
-            direction = "LONG"
-            entry_reason = "разворот RSI из перепроданности"
-        elif macd_cross_up:
-            direction = "LONG"
-            entry_reason = "пересечение MACD вверх"
-        elif pullback:
+        if pullback:
             direction = "LONG"
             entry_reason = "пуллбэк к EMA20 в восходящем тренде"
+        elif rsi_recovering:
+            direction = "LONG"
+            entry_reason = "разворот RSI вверх в восходящем тренде"
+        elif macd_cross_up:
+            direction = "LONG"
+            entry_reason = "пересечение MACD вверх по тренду"
 
     elif trend_1h == "bearish":
-        rsi_recovering = prev["rsi"] > 65 and last["rsi"] < prev["rsi"]
+        rsi_recovering = prev["rsi"] > 60 and last["rsi"] < prev["rsi"]
         macd_cross_down = prev["macd_diff"] >= 0 and last["macd_diff"] < 0
-        pullback = near_ema20 and last["rsi"] > 35 and last["close"] <= last["ema_50"]
+        pullback = near_ema20 and last["rsi"] > 32 and price_turning_down
 
-        if rsi_recovering:
-            direction = "SHORT"
-            entry_reason = "разворот RSI из перекупленности"
-        elif macd_cross_down:
-            direction = "SHORT"
-            entry_reason = "пересечение MACD вниз"
-        elif pullback:
+        if pullback:
             direction = "SHORT"
             entry_reason = "пуллбэк к EMA20 в нисходящем тренде"
+        elif rsi_recovering:
+            direction = "SHORT"
+            entry_reason = "разворот RSI вниз в нисходящем тренде"
+        elif macd_cross_down:
+            direction = "SHORT"
+            entry_reason = "пересечение MACD вниз по тренду"
 
     if direction is None:
         return None
