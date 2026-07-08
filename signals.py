@@ -36,6 +36,7 @@ def find_range_signal(coin: str, symbol: str, df_1h: pd.DataFrame,
     logger = logging.getLogger("signals")
 
     last = df_1h.iloc[-1]
+    prev = df_1h.iloc[-2]
     close = last["close"]
 
     lookback = 48
@@ -60,9 +61,9 @@ def find_range_signal(coin: str, symbol: str, df_1h: pd.DataFrame,
         return None
 
     volume_ratio = None
-    if "volume_avg" in df_1h.columns and not pd.isna(last.get("volume_avg")):
-        volume_ratio = last["volume"] / last["volume_avg"] if last["volume_avg"] > 0 else 0
-        logger.info(f"diag {coin} [RANGE]: volume_ratio={volume_ratio:.2f}")
+    if "volume_avg" in df_1h.columns and not pd.isna(prev.get("volume_avg")):
+        volume_ratio = prev["volume"] / prev["volume_avg"] if prev["volume_avg"] > 0 else 0
+        logger.info(f"diag {coin} [RANGE]: volume_ratio={volume_ratio:.2f} (закрытая свеча)")
         if volume_ratio < 0.7:
             logger.info(f"diag {coin} [RANGE]: пропуск — низкий объём")
             return None
@@ -408,9 +409,13 @@ def _find_signal_raw(coin: str, deposit: float, risk_percent: float, min_rr: flo
         return None
 
     # --- Подтверждение объёмом ---
-    if "volume_avg" in df_1h.columns and not pd.isna(last.get("volume_avg")):
-        volume_ratio = last["volume"] / last["volume_avg"] if last["volume_avg"] > 0 else 0
-        logger.info(f"diag {coin}: volume_ratio={volume_ratio:.2f}")
+    # ВАЖНО: берём объём ПРЕДЫДУЩЕЙ ЗАКРЫТОЙ свечи (prev), а не текущей (last).
+    # Текущая свеча ещё формируется (например прошло 2 мин из 60), её объём
+    # почти нулевой → volume_ratio выходил 0.02-0.27 и резал все сигналы.
+    # Предыдущая свеча полная — её объём корректен для сравнения.
+    if "volume_avg" in df_1h.columns and not pd.isna(prev.get("volume_avg")):
+        volume_ratio = prev["volume"] / prev["volume_avg"] if prev["volume_avg"] > 0 else 0
+        logger.info(f"diag {coin}: volume_ratio={volume_ratio:.2f} (закрытая свеча)")
         if volume_ratio < 0.7:
             return None
     else:
@@ -445,7 +450,7 @@ def _find_signal_raw(coin: str, deposit: float, risk_percent: float, min_rr: flo
         "macd_signal_1h": "bullish" if last["macd_diff"] > 0 else "bearish",
         "entry_reason": entry_reason,
         "market_phase": phase,
-        "volume_ratio": (last["volume"] / last["volume_avg"]) if ("volume_avg" in df_1h.columns and not pd.isna(last.get("volume_avg")) and last["volume_avg"] > 0) else None,
+        "volume_ratio": (prev["volume"] / prev["volume_avg"]) if ("volume_avg" in df_1h.columns and not pd.isna(prev.get("volume_avg")) and prev["volume_avg"] > 0) else None,
         "trade": trade,
     }
 
