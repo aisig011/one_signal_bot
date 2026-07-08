@@ -206,9 +206,13 @@ def _is_choppy_market() -> bool:
         path = window["high"].max() - window["low"].min()
         efficiency = net_move / path if path > 0 else 0
 
-        # Choppy если: было виляние направления ИЛИ цена ходила много но
-        # никуда не пришла (efficiency < 0.35 = меньше трети хода в чистом остатке)
-        is_choppy = flips >= 1 or efficiency < 0.35
+        # Choppy ТОЛЬКО если рынок реально мечется:
+        # - flips >= 2 (направление металось туда-сюда несколько раз), ИЛИ
+        # - efficiency < 0.4 (цена много ходила, но никуда не пришла = пила)
+        # ВАЖНО: flips == 1 при высокой efficiency — это НЕ хаос, а плавный
+        # разворот тренда (вверх→вниз), и это хорошая точка для входа по
+        # новому направлению. Такое НЕ блокируем.
+        is_choppy = flips >= 2 or efficiency < 0.4
 
         logger.info(
             f"_is_choppy_market: slopes far={s_far:.2f} mid={s_mid:.2f} recent={s_recent:.2f}, "
