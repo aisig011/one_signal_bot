@@ -276,3 +276,4 @@ def format_signal_message(result: dict, user: dict) -> str:
         f"{leverage_note}"
         f"{margin_note}"
     )
+
