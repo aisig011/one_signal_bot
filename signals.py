@@ -17,6 +17,16 @@ import risk_manager
 import market_phase
 
 
+# --- Анти-нож (риск ножа): порог наклона BTC для блокировки отбоев ---
+# Отбой ПРОТИВ движения BTC часто не отбивается, а пробивает границу → стоп.
+# Блокируем LONG-отбой, если BTC клонится вниз сильнее этого порога,
+# и SHORT-отбой, если BTC клонится вверх сильнее порога.
+# 0.3% ловит даже вялый снос BTC (тот, что общий btc_bias считает боковиком).
+# Режет слишком много сигналов → подними до 0.5.
+# Пропускает ножи → опусти до 0.2.
+ANTI_KNIFE_BTC_SLOPE = 0.3
+
+
 def find_range_signal(coin: str, symbol: str, df_1h: pd.DataFrame,
                       deposit: float, risk_percent: float,
                       min_rr: float = 2.0) -> dict | None:
@@ -29,7 +39,8 @@ def find_range_signal(coin: str, symbol: str, df_1h: pd.DataFrame,
        - у нижней → LONG, у верхней → SHORT
        - ближе 0.3% = почти на границе/пробой (опасно), дальше 2% = не дошла
     4. RSI в рабочей зоне 30–70, объём >= 0.7.
-    5. SL за границей, TP к противоположной границе (или к середине).
+    5. Анти-нож: не отдаём отбой ПРОТИВ движения BTC (риск ножа).
+    6. SL за границей, TP к противоположной границе (или к середине).
        Минимальный SL и обрезка R/R — в risk_manager.calculate_trade.
     """
     import logging
@@ -85,6 +96,27 @@ def find_range_signal(coin: str, symbol: str, df_1h: pd.DataFrame,
         logger.info(
             f"diag {coin} [RANGE]: пропуск — цена вне зоны отбоя "
             f"(+{near_low_pct:.1f}% от дна, -{near_high_pct:.1f}% от верха)"
+        )
+        return None
+
+    # --- Анти-нож (риск ножа): не ловим падающий/растущий нож в отбоях ---
+    # Отбой от границы — самый рискованный вход: если рынок (BTC) идёт
+    # против отбоя, цена не оттолкнётся, а проткнёт границу, и стоп снесёт.
+    # Это ловит даже ВЯЛЫЙ снос BTC, который общий btc_bias в find_signal
+    # считает боковиком (там нужно 2 признака, тут хватает наклона EMA20).
+    #   LONG-отбой от нижней границы — только если BTC НЕ падает.
+    #   SHORT-отбой от верхней границы — только если BTC НЕ растёт.
+    btc_slope = _btc_ema20_slope()
+    if direction == "LONG" and btc_slope < -ANTI_KNIFE_BTC_SLOPE:
+        logger.info(
+            f"diag {coin} [RANGE]: LONG-отбой отменён — риск ножа "
+            f"(BTC клонится вниз, наклон EMA20 {btc_slope:.2f}%)"
+        )
+        return None
+    if direction == "SHORT" and btc_slope > ANTI_KNIFE_BTC_SLOPE:
+        logger.info(
+            f"diag {coin} [RANGE]: SHORT-отбой отменён — риск ножа "
+            f"(BTC клонится вверх, наклон EMA20 {btc_slope:.2f}%)"
         )
         return None
 
@@ -224,6 +256,34 @@ def _is_choppy_market() -> bool:
     except Exception as e:
         logger.warning(f"_is_choppy_market: ошибка ({e}), считаю рынок не-choppy")
         return False  # при ошибке не блокируем (лучше пропустить чем зависнуть)
+
+
+def _btc_ema20_slope() -> float:
+    """
+    Наклон EMA20 BTC за последние 10 свечей 1h, в процентах.
+
+    >0 → BTC клонится вверх, <0 → вниз, ~0 → плоско.
+    Используется анти-нож фильтром (риск ножа) в RANGE-отбоях: ловит даже
+    вялый снос BTC, который общий _get_btc_bias ещё считает боковиком.
+    При ошибке возвращает 0.0 — тогда фильтр не блокирует (лучше не зависнуть).
+    """
+    import logging
+    logger = logging.getLogger("signals")
+    try:
+        btc_symbol = market.get_symbol("BTC")
+        df_btc = market.get_klines(btc_symbol, "1h", limit=250)
+        df_btc = indicators.add_indicators(df_btc)
+
+        ema20 = df_btc.iloc[-1]["ema_20"]
+        ema20_prev = df_btc.iloc[-10]["ema_20"] if len(df_btc) >= 10 else ema20
+        slope = (ema20 - ema20_prev) / ema20_prev * 100 if ema20_prev > 0 else 0.0
+
+        logger.info(f"_btc_ema20_slope: наклон EMA20 BTC = {slope:.2f}%")
+        return slope
+
+    except Exception as e:
+        logger.warning(f"_btc_ema20_slope: ошибка ({e}), возвращаю 0")
+        return 0.0
 
 
 def _get_btc_bias() -> str | None:
