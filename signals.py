@@ -531,24 +531,31 @@ def _calc_signal_quality(result: dict) -> dict:
     """
     Считает балл качества сигнала (информативно, не блокирует).
 
-    Очки:
-    - Объём: x1.5+ → +2, x1.0-1.5 → +1, ниже → 0
-    - Чистота отбоя (для RANGE, зона 0.5-1.5% от границы → +2, край → +1)
-    - RSI (не на краях, больше места для движения → +2, ближе к краю → +1)
-    - Согласование 4h (по направлению → +2, флэт → +1)
-    - Ширина диапазона 5%+ → +1
+    ВАЖНО: максимум зависит от ТИПА сигнала. Два критерия — «чистота отбоя»
+    (+2) и «ширина диапазона» (+1) — существуют только у отбоя от границ.
+    У трендового сигнала границ нет, и эти 3 очка ему недоступны в принципе.
+
+    Раньше максимум был жёстко 9. Из-за этого трендовый сигнал не мог
+    получить 🔥 НИКОГДА (его потолок 6/9), а «3/9 ⚠️» пугало, хотя это
+    честная половина от достижимых 6.
+
+    Теперь максимум складывается только из применимых критериев, а метка
+    ставится по ДОЛЕ от достижимого. Для отбоев пороги остались прежними
+    (7/9 = 78% → 🔥, 5/9 = 56% → ✅).
 
     Возвращает {"score": int, "max": int, "label": "🔥/✅/⚠️", "reasons": [...]}
     """
     score = 0
+    max_score = 0
     reasons = []
 
     direction = result["trade"]["direction"]
     ri = result.get("range_info") or {}
 
-    # --- Объём ---
+    # --- Объём (применим всегда, если объём посчитан) ---
     vr = result.get("volume_ratio")
     if vr is not None:
+        max_score += 2
         if vr >= 1.5:
             score += 2
             reasons.append(f"объём сильный (x{vr:.1f})")
@@ -558,7 +565,7 @@ def _calc_signal_quality(result: dict) -> dict:
         else:
             reasons.append(f"объём слабый (x{vr:.1f})")
 
-    # --- Чистота отбоя (только для RANGE, где есть границы) ---
+    # --- Чистота отбоя (ТОЛЬКО для RANGE, где есть границы) ---
     close = result["trade"]["entry_price"]
     if ri:
         low = ri.get("low")
@@ -571,6 +578,7 @@ def _calc_signal_quality(result: dict) -> dict:
             dist_pct = None
 
         if dist_pct is not None:
+            max_score += 2
             if 0.5 <= dist_pct <= 1.5:
                 score += 2
                 reasons.append("отбой в идеальной зоне")
@@ -578,48 +586,63 @@ def _calc_signal_quality(result: dict) -> dict:
                 score += 1
                 reasons.append("отбой на краю зоны")
 
-    # --- RSI ---
+    # --- RSI (применим всегда) ---
     rsi = result.get("rsi_1h")
     if rsi is not None:
+        max_score += 2
         if direction == "LONG":
             if 35 <= rsi <= 55:
                 score += 2
                 reasons.append(f"RSI в хорошей зоне ({rsi:.0f})")
             else:
                 score += 1
+                reasons.append(f"RSI на краю ({rsi:.0f})")
         else:  # SHORT
             if 45 <= rsi <= 65:
                 score += 2
                 reasons.append(f"RSI в хорошей зоне ({rsi:.0f})")
             else:
                 score += 1
+                reasons.append(f"RSI на краю ({rsi:.0f})")
 
-    # --- Согласование с 4h ---
+    # --- Согласование с 4h (применим всегда) ---
     trend_4h = result.get("trend_4h")
+    max_score += 2
     if trend_4h == "bullish" and direction == "LONG":
         score += 2
         reasons.append("4h подтверждает (вверх)")
     elif trend_4h == "bearish" and direction == "SHORT":
         score += 2
         reasons.append("4h подтверждает (вниз)")
-    elif trend_4h in ("flat", "range", None):
+    else:
         score += 1
+        reasons.append("4h не подтверждает (флэт)")
 
-    # --- Ширина диапазона ---
-    width = ri.get("width_pct")
-    if width and width >= 5.0:
-        score += 1
-        reasons.append(f"широкий диапазон ({width:.1f}%)")
+    # --- Ширина диапазона (ТОЛЬКО для RANGE) ---
+    if ri:
+        width = ri.get("width_pct")
+        if width:
+            max_score += 1
+            if width >= 5.0:
+                score += 1
+                reasons.append(f"широкий диапазон ({width:.1f}%)")
 
-    max_score = 9
-    if score >= 7:
+    # --- Метка по ДОЛЕ от достижимого максимума ---
+    ratio = score / max_score if max_score > 0 else 0.0
+    if ratio >= 0.75:
         label = "🔥 Сильный"
-    elif score >= 5:
+    elif ratio >= 0.55:
         label = "✅ Хороший"
     else:
         label = "⚠️ Средний"
 
-    return {"score": score, "max": max_score, "label": label, "reasons": reasons}
+    return {
+        "score": score,
+        "max": max_score,
+        "ratio": ratio,
+        "label": label,
+        "reasons": reasons,
+    }
 
 
 def find_signal(coin: str, deposit: float, risk_percent: float, min_rr: float = 2.0) -> dict | None:
