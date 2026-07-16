@@ -17,6 +17,25 @@ logger = logging.getLogger(__name__)
 
 SCAN_INTERVAL_SECONDS = 30 * 60  # 30 минут
 
+# --- Лимиты экспозиции ---
+# Раньше лимита не было вообще: бот проверял только "нет ли сделки по этой
+# монете". В трендовом рынке все монеты дают сигнал в одну сторону, и бот
+# высылал их пачкой (4 шорта разом = одна ставка на 4% депозита).
+#
+# Максимум одновременно открытых сделок. При риске 1% на сделку это
+# потолок потерь ~3% депозита, если рынок развернётся против всех сразу.
+MAX_ACTIVE_TRADES = 3
+
+# Максимум сигналов за один скан — чтобы не заваливать пачкой,
+# даже если свободных слотов больше.
+MAX_SIGNALS_PER_SCAN = 2
+
+# Максимум сделок в ОДНУ сторону (считая уже открытые).
+# В тренде все сигналы естественно смотрят в одну сторону — это нормально,
+# поэтому лимит равен общему. Если поднимешь MAX_ACTIVE_TRADES —
+# этот параметр начнёт ограничивать концентрацию.
+MAX_SAME_DIRECTION = 3
+
 
 async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Скан рынка по всем пользователям и их монетам каждые 30 минут."""
@@ -37,6 +56,36 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
     for user in users:
         logger.info(f"scan_market: пользователь {user['user_id']}, монеты: {user['coins']}")
 
+        # --- Сколько сделок уже открыто и в какую сторону ---
+        try:
+            active = storage.get_active_trades_for_user(user["user_id"])
+        except Exception as e:
+            logger.warning(f"scan_market: не удалось получить активные сделки: {e}")
+            active = []
+
+        active_dirs = {"LONG": 0, "SHORT": 0}
+        for t in active:
+            d = t.get("direction")
+            if d in active_dirs:
+                active_dirs[d] += 1
+
+        free_slots = MAX_ACTIVE_TRADES - len(active)
+        if free_slots <= 0:
+            logger.info(
+                f"scan_market: {user['user_id']} — лимит открытых сделок "
+                f"({len(active)}/{MAX_ACTIVE_TRADES}), сигналы не шлю"
+            )
+            continue
+
+        send_limit = min(free_slots, MAX_SIGNALS_PER_SCAN)
+        logger.info(
+            f"scan_market: {user['user_id']} — открыто {len(active)}/{MAX_ACTIVE_TRADES} "
+            f"(LONG {active_dirs['LONG']}, SHORT {active_dirs['SHORT']}), "
+            f"можно отправить до {send_limit}"
+        )
+
+        # --- Шаг 1: собираем ВСЕ подходящие сигналы (пока не шлём) ---
+        candidates = []
         for coin in user["coins"]:
             coin = coin.strip().upper()
             if not coin:
@@ -59,10 +108,8 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.info(f"scan_market: {coin} — сигнала нет")
                 continue
 
-            trade = result["trade"]
-            direction = trade["direction"]
-            entry_price = float(trade["entry_price"])
-
+            direction = result["trade"]["direction"]
+            entry_price = float(result["trade"]["entry_price"])
             logger.info(f"scan_market: {coin} — НАЙДЕН сигнал {direction} @ {entry_price}")
 
             # Защита: уже есть активная сделка по этой монете
@@ -73,6 +120,52 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
             # Кулдаун по монете (4 часа, любое направление)
             if storage.was_signal_sent_recently(user["user_id"], coin):
                 logger.info(f"scan_market: {coin} — уже отправлялся недавно, пропускаю")
+                continue
+
+            candidates.append(result)
+
+        if not candidates:
+            logger.info(f"scan_market: {user['user_id']} — подходящих сигналов нет")
+            continue
+
+        # --- Шаг 2: сортируем по КАЧЕСТВУ (лучшие вперёд) ---
+        # Раньше сигналы уходили в порядке перебора монет: кто раньше
+        # в списке, тот и отправлен. Слабый сигнал мог занять место сильного.
+        def _quality_ratio(r):
+            q = r.get("quality") or {}
+            mx = q.get("max") or 0
+            return (q.get("score", 0) / mx) if mx > 0 else 0.0
+
+        candidates.sort(key=_quality_ratio, reverse=True)
+        logger.info(
+            "scan_market: кандидаты по качеству — "
+            + ", ".join(
+                f"{r['coin']} {r['trade']['direction']} {_quality_ratio(r)*100:.0f}%"
+                for r in candidates
+            )
+        )
+
+        # --- Шаг 3: шлём лучшие, соблюдая лимиты ---
+        sent = 0
+        for result in candidates:
+            if sent >= send_limit:
+                logger.info(
+                    f"scan_market: {user['user_id']} — лимит на скан исчерпан "
+                    f"({sent}/{send_limit}), остальные сигналы пропущены"
+                )
+                break
+
+            coin = result["coin"]
+            trade = result["trade"]
+            direction = trade["direction"]
+            entry_price = float(trade["entry_price"])
+
+            # Лимит на одну сторону (считаем уже открытые + отправленные сейчас)
+            if active_dirs.get(direction, 0) >= MAX_SAME_DIRECTION:
+                logger.info(
+                    f"scan_market: {coin} {direction} — пропуск, лимит в одну сторону "
+                    f"({active_dirs[direction]}/{MAX_SAME_DIRECTION})"
+                )
                 continue
 
             text = format_signal_message(result, user)
@@ -104,7 +197,12 @@ async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception as e:
                     logger.warning(f"scan_market: не удалось сохранить message_id: {e}")
 
-                logger.info(f"scan_market: сигнал {coin} {direction} отправлен пользователю {user['user_id']}")
+                sent += 1
+                active_dirs[direction] = active_dirs.get(direction, 0) + 1
+                logger.info(
+                    f"scan_market: сигнал {coin} {direction} отправлен пользователю "
+                    f"{user['user_id']} ({sent}/{send_limit})"
+                )
             except Exception as e:
                 logger.warning(f"scan_market: не удалось отправить сообщение {user['user_id']}: {e}", exc_info=True)
 
@@ -276,4 +374,3 @@ def format_signal_message(result: dict, user: dict) -> str:
         f"{leverage_note}"
         f"{margin_note}"
     )
-
