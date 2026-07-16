@@ -2,9 +2,25 @@
 risk_manager.py
 Расчёт стоп-лосса, тейк-профитов, размера позиции и R/R
 на основе депозита и риска пользователя.
+
+Две схемы расчёта:
+- calculate_trade()       — отбой от границ диапазона (стратегия RANGE).
+                            Стоп за границей, тейк на противоположной границе.
+- calculate_trend_trade() — вход ПО ТРЕНДУ на откате.
+                            Стоп от ATR (за шумом), тейк на N риска вперёд.
+
+Почему две: вход на откате в растущем рынке случается близко к хаям.
+Схема "стоп под дном коридора, тейк на потолке" математически требует,
+чтобы цена была в нижней трети коридора — для трендового входа это
+невозможно, поэтому R/R всегда выходил хуже 1:2 и трендовые сигналы
+не проходили НИКОГДА (баг был с самого начала).
 """
 
+import logging
+
 import pandas as pd
+
+logger = logging.getLogger("risk_manager")
 
 # Максимальная доля депозита, которую можно выделить под маржу одной сделки.
 MAX_MARGIN_FRACTION = 0.40  # 40% депозита
@@ -16,6 +32,24 @@ MAX_RR = 6.0
 # Защищает от микро-стопов (0.3–0.5%), которые выбивает рыночным шумом.
 # Если расчётный стоп ближе — отодвигаем его до этого минимума.
 MIN_SL_PERCENT = 1.0  # 1%
+
+
+# --- Настройки трендовых сделок (вход на откате по тренду) ---
+
+# Стоп трендового входа = ATR * этот множитель, то есть ЗА обычным шумом
+# монеты. ATR — средний размах свечи, "насколько монета болтается сама
+# по себе". Стоп внутри шума выбивает на ровном месте.
+# Выбивает шумом слишком часто → подними до 2.5.
+# Стопы широкие, мало сигналов → опусти до 1.5.
+ATR_SL_MULTIPLIER = 2.0
+
+# Целевой R/R трендового входа: тейк ставится на столько риска вперёд.
+# В тренде цена обновляет хаи, поэтому цель впереди, а не на старом потолке.
+TREND_RR_TARGET = 2.5
+
+# Если расчётный стоп шире этого — сделку пропускаем: монета слишком
+# дёрганая, и тейк тогда улетает в нереальную даль.
+MAX_SL_PERCENT = 3.0
 
 
 def find_support_resistance(df: pd.DataFrame, lookback: int = 30) -> dict:
@@ -57,6 +91,146 @@ def find_safe_leverage(direction: str, entry_price: float, stop_loss: float, max
     return 1
 
 
+def _finalize_trade(
+    direction: str,
+    entry_price: float,
+    stop_loss: float,
+    risk_distance: float,
+    take_profit_1: float,
+    reward_distance_1: float,
+    risk_reward: float,
+    deposit: float,
+    risk_percent: float,
+    leverage: int,
+) -> dict:
+    """
+    Общая часть для обеих схем: TP2, размер позиции по риску, подбор
+    безопасного плеча, ограничение маржи, цена ликвидации.
+    """
+    # TP2 = дальше TP1 с тем же шагом
+    if direction == "LONG":
+        take_profit_2 = entry_price + reward_distance_1 * 1.7
+    else:
+        take_profit_2 = entry_price - reward_distance_1 * 1.7
+
+    # --- Расчёт размера позиции по риску ---
+    risk_amount_usd = deposit * (risk_percent / 100)
+    position_size_coin = risk_amount_usd / risk_distance
+    position_size_usd = position_size_coin * entry_price
+
+    # --- Подбор безопасного плеча ---
+    safe_leverage = find_safe_leverage(direction, entry_price, stop_loss, max_leverage=leverage)
+    leverage_reduced = safe_leverage < leverage
+    used_leverage = safe_leverage
+
+    margin_required = position_size_usd / used_leverage
+
+    # --- Защита от слишком большой маржи ---
+    max_margin = deposit * MAX_MARGIN_FRACTION
+    margin_capped = False
+    if margin_required > max_margin:
+        scale = max_margin / margin_required
+        position_size_usd *= scale
+        position_size_coin *= scale
+        risk_amount_usd *= scale
+        margin_required = max_margin
+        margin_capped = True
+
+    liquidation_price = calculate_liquidation_price(direction, entry_price, used_leverage)
+
+    return {
+        "direction": direction,
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "take_profit_1": take_profit_1,
+        "take_profit_2": take_profit_2,
+        "risk_reward": risk_reward,
+        "risk_amount_usd": risk_amount_usd,
+        "position_size_coin": position_size_coin,
+        "position_size_usd": position_size_usd,
+        "margin_required": margin_required,
+        "margin_capped": margin_capped,
+        "leverage": used_leverage,
+        "requested_leverage": leverage,
+        "leverage_reduced": leverage_reduced,
+        "liquidation_price": liquidation_price,
+        "sl_percent": abs(risk_distance / entry_price) * 100,
+        "tp1_percent": abs(reward_distance_1 / entry_price) * 100,
+    }
+
+
+def calculate_trend_trade(
+    direction: str,
+    entry_price: float,
+    atr: float,
+    deposit: float,
+    risk_percent: float,
+    min_rr: float = 2.0,
+    leverage: int = 5,
+    coin: str = "?",
+) -> dict | None:
+    """
+    Расчёт сделки для ВХОДА ПО ТРЕНДУ на откате.
+
+    - стоп: ATR * ATR_SL_MULTIPLIER, то есть ЗА обычным шумом монеты
+    - тейк: TREND_RR_TARGET риска вперёд (в тренде цена обновляет хаи)
+
+    Возвращает None (всегда с записью причины в лог), если не складывается.
+    """
+    if direction not in ("LONG", "SHORT"):
+        raise ValueError("direction должен быть 'LONG' или 'SHORT'")
+
+    if atr is None or pd.isna(atr) or atr <= 0:
+        logger.info(f"calculate_trend_trade {coin}: пропуск — нет ATR")
+        return None
+
+    atr_pct = atr / entry_price * 100
+    risk_distance = atr * ATR_SL_MULTIPLIER
+
+    # Стоп не ближе минимума (защита от микро-стопов и шума)
+    min_sl_distance = entry_price * (MIN_SL_PERCENT / 100)
+    if risk_distance < min_sl_distance:
+        risk_distance = min_sl_distance
+
+    # Стоп не шире максимума — иначе тейк улетает в нереальную даль
+    max_sl_distance = entry_price * (MAX_SL_PERCENT / 100)
+    if risk_distance > max_sl_distance:
+        logger.info(
+            f"calculate_trend_trade {coin}: пропуск — стоп слишком широкий "
+            f"({risk_distance / entry_price * 100:.2f}% > {MAX_SL_PERCENT}%, "
+            f"монета дёрганая, ATR={atr_pct:.2f}%)"
+        )
+        return None
+
+    risk_reward = TREND_RR_TARGET
+    if risk_reward < min_rr:
+        logger.info(f"calculate_trend_trade {coin}: пропуск — R/R {risk_reward:.2f} < {min_rr}")
+        return None
+
+    reward_distance_1 = risk_distance * risk_reward
+
+    if direction == "LONG":
+        stop_loss = entry_price - risk_distance
+        take_profit_1 = entry_price + reward_distance_1
+    else:  # SHORT
+        stop_loss = entry_price + risk_distance
+        take_profit_1 = entry_price - reward_distance_1
+
+    logger.info(
+        f"calculate_trend_trade {coin}: {direction}, ATR={atr_pct:.2f}%, "
+        f"sl={stop_loss:.4f} ({risk_distance / entry_price * 100:.2f}%), "
+        f"tp1={take_profit_1:.4f} ({reward_distance_1 / entry_price * 100:.2f}%), "
+        f"rr={risk_reward:.2f}"
+    )
+
+    return _finalize_trade(
+        direction=direction, entry_price=entry_price, stop_loss=stop_loss,
+        risk_distance=risk_distance, take_profit_1=take_profit_1,
+        reward_distance_1=reward_distance_1, risk_reward=risk_reward,
+        deposit=deposit, risk_percent=risk_percent, leverage=leverage,
+    )
+
+
 def calculate_trade(
     direction: str,
     entry_price: float,
@@ -68,7 +242,8 @@ def calculate_trade(
     leverage: int = 5,
 ) -> dict | None:
     """
-    Рассчитывает параметры сделки: SL, TP, размер позиции, R/R.
+    Расчёт сделки для ОТБОЯ ОТ ГРАНИЦ диапазона (стратегия RANGE).
+    Стоп за границей, тейк на противоположной границе.
 
     Защиты:
     - SL не ближе MIN_SL_PERCENT от входа (защита от микро-стопов и шума)
@@ -132,53 +307,9 @@ def calculate_trade(
             take_profit_1 = entry_price - reward_distance_1
         risk_reward = MAX_RR
 
-    # TP2 = дальше TP1 с тем же шагом
-    if direction == "LONG":
-        take_profit_2 = entry_price + reward_distance_1 * 1.7
-    else:
-        take_profit_2 = entry_price - reward_distance_1 * 1.7
-
-    # --- Расчёт размера позиции по риску ---
-    risk_amount_usd = deposit * (risk_percent / 100)
-    position_size_coin = risk_amount_usd / risk_distance
-    position_size_usd = position_size_coin * entry_price
-
-    # --- Подбор безопасного плеча ---
-    safe_leverage = find_safe_leverage(direction, entry_price, stop_loss, max_leverage=leverage)
-    leverage_reduced = safe_leverage < leverage
-    used_leverage = safe_leverage
-
-    margin_required = position_size_usd / used_leverage
-
-    # --- Защита от слишком большой маржи ---
-    max_margin = deposit * MAX_MARGIN_FRACTION
-    margin_capped = False
-    if margin_required > max_margin:
-        scale = max_margin / margin_required
-        position_size_usd *= scale
-        position_size_coin *= scale
-        risk_amount_usd *= scale
-        margin_required = max_margin
-        margin_capped = True
-
-    liquidation_price = calculate_liquidation_price(direction, entry_price, used_leverage)
-
-    return {
-        "direction": direction,
-        "entry_price": entry_price,
-        "stop_loss": stop_loss,
-        "take_profit_1": take_profit_1,
-        "take_profit_2": take_profit_2,
-        "risk_reward": risk_reward,
-        "risk_amount_usd": risk_amount_usd,
-        "position_size_coin": position_size_coin,
-        "position_size_usd": position_size_usd,
-        "margin_required": margin_required,
-        "margin_capped": margin_capped,
-        "leverage": used_leverage,
-        "requested_leverage": leverage,
-        "leverage_reduced": leverage_reduced,
-        "liquidation_price": liquidation_price,
-        "sl_percent": abs(risk_distance / entry_price) * 100,
-        "tp1_percent": abs(reward_distance_1 / entry_price) * 100,
-    }
+    return _finalize_trade(
+        direction=direction, entry_price=entry_price, stop_loss=stop_loss,
+        risk_distance=risk_distance, take_profit_1=take_profit_1,
+        reward_distance_1=reward_distance_1, risk_reward=risk_reward,
+        deposit=deposit, risk_percent=risk_percent, leverage=leverage,
+    )
