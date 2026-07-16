@@ -2,6 +2,10 @@
 signals.py
 Логика поиска точек входа.
 
+v5: трендовые входы считаются через risk_manager.calculate_trend_trade
+(стоп от ATR, тейк на N риска вперёд) — старая схема с тейком на потолке
+коридора делала R/R хуже 1:2 всегда, и трендовые сигналы не проходили.
+
 v4: тренд по 1h определяет направление для трендовой логики,
 фаза рынка (market_phase) выбирает стратегию:
 - CHAOS → не торгуем
@@ -485,20 +489,27 @@ def _find_signal_raw(coin: str, deposit: float, risk_percent: float, min_rr: flo
     df_4h = indicators.add_indicators(df_4h)
     trend_4h = indicators.get_trend(df_4h)
 
-    levels = risk_manager.find_support_resistance(df_1h, lookback=30)
     entry_price = last["close"]
 
-    trade = risk_manager.calculate_trade(
+    # --- Расчёт сделки для трендового входа ---
+    # ВАЖНО: используем calculate_trend_trade, а НЕ calculate_trade.
+    # Старая схема (стоп под дном за 30 свечей, тейк на потолке) требовала,
+    # чтобы цена была в нижней трети коридора. Вход на откате по тренду —
+    # это всегда верхняя часть коридора, поэтому R/R выходил хуже 1:2 и
+    # трендовые сигналы не проходили НИКОГДА. Теперь стоп от ATR (за шумом
+    # монеты), тейк на TREND_RR_TARGET риска вперёд.
+    trade = risk_manager.calculate_trend_trade(
         direction=direction,
         entry_price=entry_price,
-        support=levels["support"],
-        resistance=levels["resistance"],
+        atr=last.get("atr"),
         deposit=deposit,
         risk_percent=risk_percent,
         min_rr=min_rr,
+        coin=coin,
     )
 
     if trade is None:
+        # Причина уже записана в лог внутри calculate_trend_trade
         return None
 
     return {
