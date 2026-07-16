@@ -9,12 +9,13 @@ indicators.py
 import pandas as pd
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD
+from ta.volatility import AverageTrueRange
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Добавляет в DataFrame колонки с индикаторами:
-    rsi, ema_20, ema_50, ema_200, macd, macd_signal, macd_diff
+    rsi, ema_20, ema_50, ema_200, macd, macd_signal, macd_diff, atr
 
     df должен содержать колонку 'close'.
     """
@@ -33,6 +34,15 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["macd"] = macd_calc.macd()
     df["macd_signal"] = macd_calc.macd_signal()
     df["macd_diff"] = macd_calc.macd_diff()  # гистограмма (macd - signal)
+
+    # ATR (Average True Range) — средний размах свечи за 14 периодов.
+    # Это "обычный шум" монеты: насколько она болтается сама по себе,
+    # без всякого движения. Нужен для трендовых стопов: стоп должен стоять
+    # ЗА шумом, иначе монету икнёт и нас выбьет на ровном месте.
+    if "high" in df.columns and "low" in df.columns:
+        df["atr"] = AverageTrueRange(
+            high=df["high"], low=df["low"], close=df["close"], window=14
+        ).average_true_range()
 
     # Средний объём за 20 свечей — для подтверждения движения объёмом.
     # Если объём на текущей свече заметно выше среднего, движение
