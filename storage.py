@@ -188,6 +188,30 @@ def remove_active_trade(trade_id):
     conn.close()
 
 
+def remove_active_trade_by_coin(user_id: int, coin: str) -> int:
+    """
+    Убирает активную сделку по монете вручную (команда /close).
+
+    Нужна, когда сделка попала в отслеживание по ошибке (случайно нажата
+    кнопка «Вошёл в сделку») или закрыта руками на бирже. Такая сделка
+    иначе висит вечно: занимает слот и однажды пришлёт TP/SL по сделке,
+    которой не было.
+
+    Возвращает количество удалённых строк (0 = такой сделки не было).
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM active_trades WHERE user_id = %s AND coin = %s",
+        (user_id, coin.strip().upper()),
+    )
+    deleted = cursor.rowcount
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return deleted
+
+
 def get_active_trades_for_user(user_id: int):
     """Активные (отслеживаемые) сделки конкретного пользователя — для /debug."""
     conn = get_connection()
