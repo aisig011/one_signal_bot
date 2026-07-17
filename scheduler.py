@@ -4,7 +4,9 @@ scheduler.py
 по их списку монет, ищет сигналы и присылает их в Telegram.
 """
 
+import datetime
 import logging
+from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -16,6 +18,35 @@ import market
 logger = logging.getLogger(__name__)
 
 SCAN_INTERVAL_SECONDS = 30 * 60  # 30 минут
+
+# --- Рабочее окно ---
+# Сигналы шлём только в это время (по Киеву). Ночью рынок тонкий,
+# входить не в чем, а спать хочется.
+# ВАЖНО: окно ограничивает ТОЛЬКО поиск новых сигналов.
+# Слежка за уже открытыми сделками (check_active_trades) работает
+# круглосуточно — TP/SL может сработать ночью, и об этом надо узнать.
+WORK_TIMEZONE = "Europe/Kyiv"
+WORK_START = datetime.time(8, 30)
+WORK_END = datetime.time(22, 0)
+
+
+def _is_working_hours() -> bool:
+    """
+    True, если сейчас рабочее окно по Киеву.
+
+    При ошибке с часовым поясом возвращает True (не блокируем торговлю
+    из-за технической проблемы) и громко пишет в лог.
+    """
+    try:
+        now = datetime.datetime.now(ZoneInfo(WORK_TIMEZONE))
+    except Exception as e:
+        logger.error(
+            f"_is_working_hours: не удалось определить время в {WORK_TIMEZONE} ({e}). "
+            f"Проверь, что пакет tzdata есть в requirements.txt. Окно НЕ применяю."
+        )
+        return True
+
+    return WORK_START <= now.time() <= WORK_END
 
 # --- Лимиты экспозиции ---
 # Раньше лимита не было вообще: бот проверял только "нет ли сделки по этой
@@ -39,6 +70,15 @@ MAX_SAME_DIRECTION = 3
 
 async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Скан рынка по всем пользователям и их монетам каждые 30 минут."""
+    # --- Рабочее окно: ночью сигналы не ищем ---
+    if not _is_working_hours():
+        now_str = datetime.datetime.now(ZoneInfo(WORK_TIMEZONE)).strftime("%H:%M")
+        logger.info(
+            f"scan_market: вне рабочего окна (сейчас {now_str} по Киеву, "
+            f"окно {WORK_START.strftime('%H:%M')}–{WORK_END.strftime('%H:%M')}), скан пропущен"
+        )
+        return
+
     logger.info("scan_market: запуск сканирования")
 
     try:
