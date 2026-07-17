@@ -693,6 +693,57 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ============================================================
+#  /close — убрать активную сделку вручную
+# ============================================================
+async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Убирает сделку из отслеживания: /close ATOM
+
+    Нужно, если кнопка «Вошёл в сделку» нажата случайно или сделка
+    закрыта руками на бирже. Иначе она висит вечно, занимает слот
+    и однажды пришлёт TP/SL по сделке, которой не было.
+    """
+    user_id = update.effective_user.id
+    user = storage.get_user(user_id)
+
+    if not user or not user["deposit"]:
+        await update.message.reply_text("Ты ещё не настроен. Напиши /start чтобы начать.")
+        return
+
+    if not context.args:
+        active = storage.get_active_trades_for_user(user_id)
+        if not active:
+            await update.message.reply_text("Активных сделок нет — закрывать нечего.")
+            return
+        lines = ["Укажи монету: `/close ATOM`\n", "*Сейчас открыты:*"]
+        for t in active:
+            emoji = "🟢" if t["direction"] == "LONG" else "🔴"
+            lines.append(f"  {emoji} {t['coin']} {t['direction']} — вход {t['entry_price']:.4f}")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    coin = context.args[0].strip().upper()
+
+    try:
+        deleted = storage.remove_active_trade_by_coin(user_id, coin)
+    except Exception as e:
+        logger.error(f"close_command: ошибка удаления {coin} для {user_id}: {e}", exc_info=True)
+        await update.message.reply_text("Не получилось убрать сделку — ошибка базы. Попробуй ещё раз.")
+        return
+
+    if deleted:
+        logger.info(f"close_command: пользователь {user_id} убрал сделку {coin}")
+        await update.message.reply_text(
+            f"✅ Сделка {coin} убрана из отслеживания.\n"
+            f"Слот освобождён, новые сигналы по {coin} снова возможны."
+        )
+    else:
+        await update.message.reply_text(
+            f"Активной сделки по {coin} нет. Проверь список: /debug"
+        )
+
+
+# ============================================================
 #  Глобальный обработчик ошибок — чтобы ошибки в job_queue
 #  (фоновом сканировании) не "проглатывались" молча
 # ============================================================
@@ -772,6 +823,7 @@ def main():
     app.add_handler(CommandHandler("check", check_command))
     app.add_handler(CommandHandler("signal", signal_command))
     app.add_handler(CommandHandler("debug", debug_command))
+    app.add_handler(CommandHandler("close", close_command))
 
     # Кнопка "Вошёл в сделку" под сигналом
     app.add_handler(CallbackQueryHandler(entered_trade_button, pattern="^entered_"))
