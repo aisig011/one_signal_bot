@@ -82,6 +82,23 @@ def init_db():
             outcome_at TIMESTAMP DEFAULT NULL
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS channel_signals (
+            id SERIAL PRIMARY KEY,
+            coin TEXT,
+            symbol TEXT,
+            direction TEXT,
+            entry_price REAL,
+            stop_loss REAL,
+            take_profit_1 REAL,
+            take_profit_2 REAL,
+            outcome TEXT DEFAULT NULL,
+            outcome_price REAL DEFAULT NULL,
+            posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            outcome_at TIMESTAMP DEFAULT NULL
+        )
+    """)
+
     # Миграции для существующих таблиц
     cursor.execute("""
         ALTER TABLE active_trades
@@ -415,6 +432,114 @@ def mark_signal_sent(user_id: int, coin: str, direction: str, entry_price: float
     conn.commit()
     cursor.close()
     conn.close()
+
+
+# ============================================================
+#  Канал: публикация, дневной лимит, трекинг результата
+# ============================================================
+
+def count_channel_signals_today(tz_offset_hours: int = 3) -> int:
+    """Сколько сигналов опубликовано в канал сегодня (по Киеву)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT COUNT(*) FROM channel_signals
+        WHERE posted_at::date = (NOW() + (%s || ' hours')::INTERVAL)::date
+    """, (str(tz_offset_hours),))
+    n = cursor.fetchone()[0]
+    cursor.close()
+    conn.close()
+    return n
+
+
+def was_channel_signal_recent(coin: str, hours: int = 6) -> bool:
+    """Был ли уже сигнал по монете в канале за N часов."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT 1 FROM channel_signals
+        WHERE coin = %s AND posted_at > NOW() - (%s || ' hours')::INTERVAL
+        LIMIT 1
+    """, (coin, str(hours)))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return row is not None
+
+
+def log_channel_signal(coin, symbol, direction, entry_price,
+                       stop_loss, take_profit_1, take_profit_2) -> int:
+    """Записывает опубликованный в канал сигнал. outcome заполнится позже."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO channel_signals
+        (coin, symbol, direction, entry_price, stop_loss, take_profit_1, take_profit_2)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+    """, (coin, symbol, direction, float(entry_price), float(stop_loss),
+          float(take_profit_1), float(take_profit_2)))
+    new_id = cursor.fetchone()[0]
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return new_id
+
+
+def get_open_channel_signals():
+    """Канальные сигналы без результата (для фоновой проверки цены)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, coin, symbol, direction, entry_price, stop_loss, take_profit_1
+        FROM channel_signals
+        WHERE outcome IS NULL
+        AND posted_at > NOW() - INTERVAL '7 days'
+    """)
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return [
+        {"id": r[0], "coin": r[1], "symbol": r[2], "direction": r[3],
+         "entry_price": r[4], "stop_loss": r[5], "take_profit_1": r[6]}
+        for r in rows
+    ]
+
+
+def resolve_channel_signal(signal_id: int, outcome: str, outcome_price: float):
+    """Записывает результат канального сигнала: 'WIN' (Ціль 1) или 'LOSS' (Стоп)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE channel_signals
+        SET outcome = %s, outcome_price = %s, outcome_at = CURRENT_TIMESTAMP
+        WHERE id = %s AND outcome IS NULL
+    """, (outcome, float(outcome_price), signal_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def get_channel_stats(days: int = 30) -> dict:
+    """Статистика канала для раздела в /stats."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT outcome, COUNT(*) FROM channel_signals
+        WHERE posted_at > NOW() - (%s || ' days')::INTERVAL
+        GROUP BY outcome
+    """, (str(days),))
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    stats = {"total": 0, "win": 0, "loss": 0, "open": 0, "days": days}
+    for outcome, cnt in rows:
+        stats["total"] += cnt
+        if outcome == "WIN":    stats["win"] += cnt
+        elif outcome == "LOSS": stats["loss"] += cnt
+        else:                   stats["open"] += cnt
+    return stats
 
 
 def get_user(user_id: int):
