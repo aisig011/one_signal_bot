@@ -34,10 +34,25 @@ def _is_working_hours() -> bool:
     return WORK_START <= now.time() <= WORK_END
 
 
-# --- Лимиты экспозиции ---
+# --- Лимиты экспозиции (личка бота) ---
 MAX_ACTIVE_TRADES = 3
 MAX_SIGNALS_PER_SCAN = 2
 MAX_SAME_DIRECTION = 3
+
+# --- Бесплатный канал (витрина) ---
+CHANNEL_ID = -1004312355023          # приватный канал ONE SIGNAL (бот = админ)
+CHANNEL_BOT_USERNAME = "one_s1gnal"  # для CTA в конце поста
+CHANNEL_MIN_QUALITY_RATIO = 0.75     # только 🔥
+CHANNEL_MIN_VOLUME = 1.0             # объём выше среднего (в личке хватает 0.7)
+CHANNEL_MAX_PER_DAY = 2              # не больше 2 сигналов в день
+CHANNEL_COIN_COOLDOWN_H = 6          # одна монета не чаще раза в 6 часов
+CHANNEL_LEVERAGE = "x5–10"
+
+CHANNEL_COINS = [
+    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "LINK", "DOT",
+    "LTC", "TRX", "ATOM", "NEAR", "APT", "OP", "ARB", "INJ", "TIA", "SUI",
+    "HYPE", "ZEC",
+]
 
 
 async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -328,6 +343,186 @@ async def check_signal_log(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.info(f"check_signal_log: {entry['coin']} {direction} → {outcome} @ {price:.4f}")
             except Exception as e:
                 logger.warning(f"check_signal_log: не удалось записать outcome: {e}")
+
+
+
+# ============================================================
+#  Канал: строгий отбор + украинский формат + трекинг результата
+# ============================================================
+
+def _channel_explanation(result: dict) -> str:
+    """Живое объяснение на украинском из наших данных. Без ИИ — всегда правда."""
+    direction = result["trade"]["direction"]
+    phase = result.get("market_phase", "")
+    vr = result.get("volume_ratio")
+    trend_4h = result.get("trend_4h")
+    is_range = phase == "RANGE"
+
+    parts = []
+    if direction == "SHORT":
+        if is_range:
+            parts.append("Ціна підійшла до верхньої межі діапазону й почала розворот вниз — заходимо в шорт від опору.")
+        else:
+            parts.append("Ринок у низхідному тренді. Ціна відкотилась угору й розвертається вниз — заходимо за трендом у шорт.")
+    else:
+        if is_range:
+            parts.append("Ціна опустилась до нижньої межі діапазону й почала розворот угору — заходимо в лонг від підтримки.")
+        else:
+            parts.append("Ринок у висхідному тренді. Ціна відкотилась вниз і розвертається вгору — заходимо за трендом у лонг.")
+
+    if (trend_4h == "bearish" and direction == "SHORT") or (trend_4h == "bullish" and direction == "LONG"):
+        parts.append("Старший таймфрейм (4h) підтверджує напрямок.")
+    if vr is not None and vr >= 1.0:
+        parts.append(f"Обʼєм вищий за середній (x{vr:.1f}) — рух підкріплений.")
+    if direction == "SHORT":
+        parts.append("Ризик: якщо ринок різко піде вгору — стоп захистить від збитку.")
+    else:
+        parts.append("Ризик: якщо ринок різко піде вниз — стоп захистить від збитку.")
+    return " ".join(parts)
+
+
+def format_channel_signal(result: dict) -> str:
+    """Украинский формат для канала. Без расчёта депозита."""
+    trade = result["trade"]
+    coin = result["coin"]
+    direction = trade["direction"]
+    entry = trade["entry_price"]
+
+    header = f"📉 *{coin}/USDT — SHORT*" if direction == "SHORT" else f"📈 *{coin}/USDT — LONG*"
+    tp1, tp2, sl = trade["take_profit_1"], trade["take_profit_2"], trade["stop_loss"]
+    tp1_pct = abs(tp1 - entry) / entry * 100
+    tp2_pct = abs(tp2 - entry) / entry * 100
+    sl_pct = abs(sl - entry) / entry * 100
+
+    return (
+        f"{header}\n\n"
+        f"💵 Вхід: {entry:.4f}\n"
+        f"🎯 Ціль 1: {tp1:.4f} (+{tp1_pct:.1f}%)\n"
+        f"🎯 Ціль 2: {tp2:.4f} (+{tp2_pct:.1f}%)\n"
+        f"🛑 Стоп: {sl:.4f} (-{sl_pct:.1f}%)\n\n"
+        f"⚙️ Кредитне плече: {CHANNEL_LEVERAGE}\n"
+        f"📊 Ризик/прибуток: 1:{trade['risk_reward']:.1f}\n\n"
+        f"📈 *Чому цей вхід:*\n{_channel_explanation(result)}\n\n"
+        f"⚠️ Не заходь усім депозитом. Став стоп одразу.\n"
+        f"Це не фінансова порада — торгуй з головою.\n\n"
+        f"📲 Хочеш більше сигналів і персональний розрахунок під свій депозит?\n"
+        f"Наш бот усе порахує сам 👉 @{CHANNEL_BOT_USERNAME}"
+    )
+
+
+async def scan_channel(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отдельный скан для канала: только лучший 🔥-сигнал, строгий фильтр."""
+    if not _is_working_hours():
+        return
+
+    try:
+        posted_today = storage.count_channel_signals_today()
+    except Exception as e:
+        logger.error(f"scan_channel: ошибка лимита: {e}", exc_info=True)
+        return
+
+    if posted_today >= CHANNEL_MAX_PER_DAY:
+        logger.info(f"scan_channel: дневной лимит ({posted_today}/{CHANNEL_MAX_PER_DAY})")
+        return
+
+    DUMMY_DEPOSIT, DUMMY_RISK = 1000.0, 1.0
+    candidates = []
+    for coin in CHANNEL_COINS:
+        coin = coin.strip().upper()
+        if not coin:
+            continue
+        try:
+            result = signals.find_signal(coin=coin, deposit=DUMMY_DEPOSIT,
+                                         risk_percent=DUMMY_RISK, min_rr=2.0)
+        except Exception as e:
+            logger.warning(f"scan_channel: ошибка {coin}: {e}")
+            continue
+        if result is None:
+            continue
+
+        q = result.get("quality") or {}
+        ratio = q.get("ratio", 0.0)
+        vr = result.get("volume_ratio")
+        trend_4h = result.get("trend_4h")
+        direction = result["trade"]["direction"]
+
+        if ratio < CHANNEL_MIN_QUALITY_RATIO:
+            continue
+        if vr is None or vr < CHANNEL_MIN_VOLUME:
+            continue
+        confirms = (trend_4h == "bearish" and direction == "SHORT") or \
+                   (trend_4h == "bullish" and direction == "LONG")
+        if not confirms:
+            continue
+        if storage.was_channel_signal_recent(coin, CHANNEL_COIN_COOLDOWN_H):
+            continue
+        candidates.append(result)
+
+    if not candidates:
+        logger.info("scan_channel: подходящих сигналов нет")
+        return
+
+    candidates.sort(key=lambda r: (r.get("quality") or {}).get("ratio", 0), reverse=True)
+    best = candidates[0]
+    trade = best["trade"]
+    coin = best["coin"]
+
+    text = format_channel_signal(best)
+    try:
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode="Markdown")
+        storage.log_channel_signal(
+            coin=coin, symbol=best["symbol"], direction=trade["direction"],
+            entry_price=trade["entry_price"], stop_loss=trade["stop_loss"],
+            take_profit_1=trade["take_profit_1"], take_profit_2=trade["take_profit_2"],
+        )
+        logger.info(f"scan_channel: опубликован {coin} {trade['direction']} ({posted_today+1}/{CHANNEL_MAX_PER_DAY})")
+    except Exception as e:
+        logger.error(f"scan_channel: не удалось опубликовать в {CHANNEL_ID}: {e}", exc_info=True)
+
+
+async def check_channel_signals(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Тихо фиксирует результат канальных сигналов по цене.
+    Логика (по договорённости): дошла до Цели 1 → WIN, дошла до Стопа → LOSS.
+    Что было после Цели 1 — не важно (стоп в безубыток). Не постит в канал.
+    """
+    try:
+        open_signals = storage.get_open_channel_signals()
+    except Exception as e:
+        logger.error(f"check_channel_signals: ошибка: {e}", exc_info=True)
+        return
+
+    if not open_signals:
+        return
+
+    price_cache = {}
+    for sig in open_signals:
+        symbol = sig["symbol"]
+        try:
+            if symbol not in price_cache:
+                price_cache[symbol] = market.get_current_price(symbol)
+            price = price_cache[symbol]
+        except Exception as e:
+            logger.warning(f"check_channel_signals: цена {symbol} недоступна: {e}")
+            continue
+
+        direction = sig["direction"]
+        hit_tp = False
+        hit_sl = False
+        if direction == "LONG":
+            if price >= sig["take_profit_1"]: hit_tp = True
+            elif price <= sig["stop_loss"]:   hit_sl = True
+        else:
+            if price <= sig["take_profit_1"]: hit_tp = True
+            elif price >= sig["stop_loss"]:   hit_sl = True
+
+        if hit_tp or hit_sl:
+            outcome = "WIN" if hit_tp else "LOSS"
+            try:
+                storage.resolve_channel_signal(sig["id"], outcome, price)
+                logger.info(f"check_channel_signals: {sig['coin']} {direction} → {outcome} @ {price:.4f}")
+            except Exception as e:
+                logger.warning(f"check_channel_signals: не записал outcome: {e}")
 
 
 def format_signal_message(result: dict, user: dict) -> str:
