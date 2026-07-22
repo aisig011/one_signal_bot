@@ -55,6 +55,57 @@ CHANNEL_COINS = [
 ]
 
 
+
+# ============================================================
+#  Проверка достижения уровней по СВЕЧАМ (а не по текущей цене)
+# ============================================================
+
+# Сколько последних 5-минутных свечей проверять.
+# Задачи ходят раз в 2-5 минут, берём запас: 6 свечей = 30 минут истории.
+# Так прокол уровня не потеряется, даже если бот на пару циклов задержался.
+LEVEL_CHECK_CANDLES = 6
+
+
+def _check_levels_by_candles(symbol: str, direction: str,
+                             take_profit: float, stop_loss: float) -> str | None:
+    """
+    Проверяет, задела ли цена TP или SL, по МАКСИМУМАМ/МИНИМУМАМ свечей.
+
+    Почему не по текущей цене: бот смотрит рынок раз в несколько минут.
+    Если цена ткнула уровень между проверками и вернулась обратно —
+    текущая цена этого уже не покажет, и сделка зависнет «открытой»
+    навсегда. Именно так статистика теряла сработавшие стопы.
+
+    Возвращает "TP", "SL" или None.
+    Если задеты оба уровня в одном окне — возвращает SL (консервативно:
+    считаем худший исход, чтобы не завышать винрейт).
+    """
+    try:
+        df = market.get_klines(symbol, "5m", limit=LEVEL_CHECK_CANDLES)
+    except Exception as e:
+        logger.warning(f"_check_levels_by_candles: не удалось получить свечи {symbol}: {e}")
+        return None
+
+    if df is None or len(df) == 0:
+        return None
+
+    high = float(df["high"].max())
+    low = float(df["low"].min())
+
+    if direction == "LONG":
+        hit_tp = high >= take_profit
+        hit_sl = low <= stop_loss
+    else:  # SHORT
+        hit_tp = low <= take_profit
+        hit_sl = high >= stop_loss
+
+    if hit_sl:
+        return "SL"   # худший исход в приоритете — не завышаем статистику
+    if hit_tp:
+        return "TP"
+    return None
+
+
 async def scan_market(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Скан рынка по всем пользователям каждые 30 минут."""
     if not _is_working_hours():
@@ -228,31 +279,20 @@ async def check_active_trades(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not trades:
         return
 
-    price_cache = {}
-
     for t in trades:
         symbol = t["symbol"]
-        try:
-            if symbol not in price_cache:
-                price_cache[symbol] = market.get_current_price(symbol)
-            price = price_cache[symbol]
-        except Exception as e:
-            logger.warning(f"check_active_trades: не удалось получить цену {symbol}: {e}")
-            continue
-
         direction = t["direction"]
-        hit_tp = False
-        hit_sl = False
 
-        if direction == "LONG":
-            if price >= t["take_profit_1"]: hit_tp = True
-            elif price <= t["stop_loss"]:   hit_sl = True
-        else:
-            if price <= t["take_profit_1"]: hit_tp = True
-            elif price >= t["stop_loss"]:   hit_sl = True
-
-        if not (hit_tp or hit_sl):
+        # Проверяем по свечам, а не по текущей цене: прокол уровня
+        # между проверками иначе теряется.
+        outcome = _check_levels_by_candles(
+            symbol, direction, t["take_profit_1"], t["stop_loss"]
+        )
+        if outcome is None:
             continue
+
+        hit_tp = outcome == "TP"
+        hit_sl = outcome == "SL"
 
         if hit_tp:
             pct = abs(t["take_profit_1"] - t["entry_price"]) / t["entry_price"] * 100
@@ -313,36 +353,24 @@ async def check_signal_log(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not open_logs:
         return
 
-    price_cache = {}
-
     for entry in open_logs:
         symbol = entry["symbol"]
-        try:
-            if symbol not in price_cache:
-                price_cache[symbol] = market.get_current_price(symbol)
-            price = price_cache[symbol]
-        except Exception as e:
-            logger.warning(f"check_signal_log: цена {symbol} недоступна: {e}")
+        direction = entry["direction"]
+
+        # По свечам, а не по текущей цене — иначе прокол уровня
+        # между проверками теряется и сигнал висит «открытым» вечно.
+        outcome = _check_levels_by_candles(
+            symbol, direction, entry["take_profit_1"], entry["stop_loss"]
+        )
+        if outcome is None:
             continue
 
-        direction = entry["direction"]
-        hit_tp = False
-        hit_sl = False
-
-        if direction == "LONG":
-            if price >= entry["take_profit_1"]: hit_tp = True
-            elif price <= entry["stop_loss"]:   hit_sl = True
-        else:
-            if price <= entry["take_profit_1"]: hit_tp = True
-            elif price >= entry["stop_loss"]:   hit_sl = True
-
-        if hit_tp or hit_sl:
-            outcome = "TP" if hit_tp else "SL"
-            try:
-                storage.resolve_signal_log(entry["id"], outcome, price)
-                logger.info(f"check_signal_log: {entry['coin']} {direction} → {outcome} @ {price:.4f}")
-            except Exception as e:
-                logger.warning(f"check_signal_log: не удалось записать outcome: {e}")
+        level_price = entry["take_profit_1"] if outcome == "TP" else entry["stop_loss"]
+        try:
+            storage.resolve_signal_log(entry["id"], outcome, level_price)
+            logger.info(f"check_signal_log: {entry['coin']} {direction} → {outcome} @ {level_price:.4f}")
+        except Exception as e:
+            logger.warning(f"check_signal_log: не удалось записать outcome: {e}")
 
 
 
@@ -495,34 +523,24 @@ async def check_channel_signals(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not open_signals:
         return
 
-    price_cache = {}
     for sig in open_signals:
         symbol = sig["symbol"]
-        try:
-            if symbol not in price_cache:
-                price_cache[symbol] = market.get_current_price(symbol)
-            price = price_cache[symbol]
-        except Exception as e:
-            logger.warning(f"check_channel_signals: цена {symbol} недоступна: {e}")
+        direction = sig["direction"]
+
+        # По свечам — прокол уровня между проверками не теряется.
+        res = _check_levels_by_candles(
+            symbol, direction, sig["take_profit_1"], sig["stop_loss"]
+        )
+        if res is None:
             continue
 
-        direction = sig["direction"]
-        hit_tp = False
-        hit_sl = False
-        if direction == "LONG":
-            if price >= sig["take_profit_1"]: hit_tp = True
-            elif price <= sig["stop_loss"]:   hit_sl = True
-        else:
-            if price <= sig["take_profit_1"]: hit_tp = True
-            elif price >= sig["stop_loss"]:   hit_sl = True
-
-        if hit_tp or hit_sl:
-            outcome = "WIN" if hit_tp else "LOSS"
-            try:
-                storage.resolve_channel_signal(sig["id"], outcome, price)
-                logger.info(f"check_channel_signals: {sig['coin']} {direction} → {outcome} @ {price:.4f}")
-            except Exception as e:
-                logger.warning(f"check_channel_signals: не записал outcome: {e}")
+        outcome = "WIN" if res == "TP" else "LOSS"
+        level_price = sig["take_profit_1"] if res == "TP" else sig["stop_loss"]
+        try:
+            storage.resolve_channel_signal(sig["id"], outcome, level_price)
+            logger.info(f"check_channel_signals: {sig['coin']} {direction} → {outcome} @ {level_price:.4f}")
+        except Exception as e:
+            logger.warning(f"check_channel_signals: не записал outcome: {e}")
 
 
 def format_signal_message(result: dict, user: dict) -> str:
