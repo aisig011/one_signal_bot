@@ -472,6 +472,24 @@ def _find_signal_raw(coin: str, deposit: float, risk_percent: float, min_rr: flo
     if direction is None:
         return None
 
+    # --- Анти-нож для ТРЕНДОВЫХ входов ---
+    # Раньше анти-нож стоял ТОЛЬКО в RANGE-отбоях. Трендовые входы шли
+    # без него — и ловили стопы, когда BTC двигался против сигнала.
+    # Логика та же: не входим против сноса рынка.
+    btc_slope = _btc_ema20_slope()
+    if direction == "LONG" and btc_slope < -ANTI_KNIFE_BTC_SLOPE:
+        logger.info(
+            f"diag {coin}: LONG отменён — риск ножа "
+            f"(BTC клонится вниз, наклон EMA20 {btc_slope:.2f}%)"
+        )
+        return None
+    if direction == "SHORT" and btc_slope > ANTI_KNIFE_BTC_SLOPE:
+        logger.info(
+            f"diag {coin}: SHORT отменён — риск ножа "
+            f"(BTC клонится вверх, наклон EMA20 {btc_slope:.2f}%)"
+        )
+        return None
+
     # --- Подтверждение объёмом ---
     # ВАЖНО: берём объём ПРЕДЫДУЩЕЙ ЗАКРЫТОЙ свечи (prev), а не текущей (last).
     # Текущая свеча ещё формируется (например прошло 2 мин из 60), её объём
